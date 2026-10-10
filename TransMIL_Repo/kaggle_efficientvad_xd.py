@@ -1,5 +1,5 @@
 """
-EfficientVAD — XD-Violence Training (v5)
+EfficientVAD — XD-Violence Training (v6)
 =========================================
 Frame-level AP evaluation matching CLIP-TSA / VadCLIP methodology.
 GT built from annotations.txt; predictions expanded via np.repeat(pred, 16).
@@ -14,7 +14,7 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from sklearn.metrics import roc_auc_score, average_precision_score
 
-VERSION = "v5-frame-level-ap"
+VERSION = "v6-frame-level-ap"
 CLIP_LEN = 16
 NUM_SEG = 32
 
@@ -160,37 +160,37 @@ print(f"First 3 test: {[os.path.basename(p) for p in test_paths[:3]]}")
 
 
 # ═══════════════════════════════════════════════════════════
-# 3. FRAME-LEVEL GT  (matches VadCLIP make_gt_xd.py)
+# 3. FRAME-LEVEL GT  (matches VadCLIP make_gt_xd.py exactly)
 # ═══════════════════════════════════════════════════════════
 
 print("\n" + "=" * 70)
 print("PHASE 3: BUILDING FRAME-LEVEL GT")
 print("=" * 70)
 
-# Parse annotations.txt → dict {video_name: [(start, end), ...]}
-annot_dict = {}
+# Read raw annotation lines (VadCLIP's exact approach)
 with open(ANNOT_PATH) as f:
-    for line in f:
-        parts = line.strip().split()
-        if len(parts) < 3:
-            continue
-        key = parts[0]
-        intervals = []
-        for i in range(1, len(parts) - 1, 2):
-            intervals.append((int(parts[i]), int(parts[i + 1])))
-        annot_dict[key] = intervals
+    gt_lines = list(f)
+print(f"Loaded {len(gt_lines)} annotation lines")
 
-print(f"Loaded {len(annot_dict)} temporal annotations")
+# Debug: show first 3 annotation line keys and first 3 abnormal test vnames
+print("\nFirst 3 annotation lines (key only):")
+for i, line in enumerate(gt_lines[:3]):
+    print(f"  ann[{i}]: '{line.strip().split()[0]}'")
+
+abn_test_names = [vname(p) for p in test_paths if not is_normal(vname(p))]
+print(f"\nFirst 3 abnormal test vnames:")
+for i, n in enumerate(abn_test_names[:3]):
+    print(f"  test[{i}]: '{n}'")
 
 
 def build_frame_gt(file_paths):
     """
-    Per video (matching VadCLIP's make_gt_xd.py):
-      T = feat.shape[0]
-      lens = (T + 1) * 16
-      gt_vec = zeros(lens)
-      fill abnormal intervals from annotations.txt
-      gt.extend(gt_vec[:-16])  →  T * 16 frames per video
+    Exactly replicates VadCLIP's make_gt_xd.py:
+      - For each test video, get name by stripping __0.npy suffix
+      - If not normal (no label_A), search annotation lines with
+        'name in gt_line' (substring match against full line)
+      - Parse intervals and fill gt_vec
+      - gt.extend(gt_vec[:-16])
     """
     gt_all = []
     seg_counts = []
@@ -205,29 +205,30 @@ def build_frame_gt(file_paths):
 
         name = vname(path)
         if not is_normal(name):
-            found = False
-            if name in annot_dict:
-                for s, e in annot_dict[name]:
-                    gt_vec[s:e] = 1.0
-                found = True
-            else:
-                for ann_key, intervals in annot_dict.items():
-                    if ann_key in name or name in ann_key:
-                        for s, e in intervals:
-                            gt_vec[s:e] = 1.0
-                        found = True
-                        break
-            if found:
-                matched += 1
+            for gt_line in gt_lines:
+                if name in gt_line:
+                    matched += 1
+                    gt_content = gt_line.strip().split()
+                    abnormal_fragment = [
+                        [int(gt_content[i]), int(gt_content[j])]
+                        for i in range(1, len(gt_content), 2)
+                        for j in range(2, len(gt_content), 2)
+                        if j == i + 1
+                    ]
+                    if len(abnormal_fragment) != 0:
+                        abnormal_fragment = np.array(abnormal_fragment)
+                        for frag in abnormal_fragment:
+                            gt_vec[frag[0]:frag[1]] = 1.0
+                    break
 
-        gt_all.extend(gt_vec[: -CLIP_LEN])
+        gt_all.extend(gt_vec[:-CLIP_LEN])
 
     gt = np.array(gt_all, dtype=np.float32)
     n_pos = int(gt.sum())
-    print(f"GT frames:    {len(gt):,}")
+    n_abn = sum(1 for p in file_paths if not is_normal(vname(p)))
+    print(f"\nGT frames:    {len(gt):,}")
     print(f"Anomalous:    {n_pos:,}  ({100 * n_pos / max(1, len(gt)):.2f}%)")
-    print(f"Matched:      {matched} / {sum(1 for p in file_paths if not is_normal(vname(p)))} "
-          f"abnormal videos")
+    print(f"Matched:      {matched} / {n_abn} abnormal videos")
     return gt, seg_counts
 
 
@@ -235,6 +236,34 @@ frame_gt, test_seg_counts = build_frame_gt(test_paths)
 
 # Sanity check against known VadCLIP gt.npy stats
 print(f"Expected:     ~2,331,296 frames / ~537,882 anomalous (VadCLIP)")
+
+# If matching failed, print detailed diagnostics
+if frame_gt.sum() == 0:
+    print("\n*** WARNING: GT has zero anomalous frames! ***")
+    print("Diagnostic: checking why substring matching failed...")
+    n_checked = 0
+    for p in test_paths:
+        nm = vname(p)
+        if is_normal(nm):
+            continue
+        n_checked += 1
+        if n_checked > 5:
+            break
+        found_any = False
+        for gt_line in gt_lines:
+            if nm in gt_line:
+                found_any = True
+                break
+        print(f"  vname='{nm}' | in_any_line={found_any}")
+        if not found_any:
+            # Try partial matches
+            nm_parts = nm.split("__")
+            print(f"    split parts: {nm_parts}")
+            for gl in gt_lines[:3]:
+                key = gl.strip().split()[0]
+                key_parts = key.split("__")
+                print(f"    ann key parts: {key_parts}")
+    print("*** Check above: do feature filenames match annotation keys? ***")
 
 
 # ═══════════════════════════════════════════════════════════
