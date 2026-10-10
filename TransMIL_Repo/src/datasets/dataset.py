@@ -1,7 +1,29 @@
 import os
+import pickle
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+
+
+def load_features(path, num_segments=32):
+    """Load and temporally resample features to fixed number of segments."""
+    feat = np.load(path)
+    if feat.ndim == 1:
+        feat = feat.reshape(1, -1)
+    n = feat.shape[0]
+    if n == num_segments:
+        return feat
+    if n > num_segments:
+        indices = np.linspace(0, n - 1, num_segments, dtype=int)
+        return feat[indices]
+    reps = int(np.ceil(num_segments / n))
+    feat = np.tile(feat, (reps, 1))[:num_segments]
+    return feat
+
+
+def load_pickle(path):
+    with open(path, 'rb') as f:
+        return pickle.load(f)
 
 class ShanghaiTechMIL(Dataset):
     """
@@ -291,5 +313,98 @@ class MILPairDatasetGeneric(Dataset):
         return anom_feat, norm_feat
 
 
-# ── 19. Per-Category Analysis (UCF-Crime) ─────────────────────────────────
+# ── XD-Violence Dataset ─────────────────────────────────────────────────
+
+class XDViolenceMIL(Dataset):
+    """
+    XD-Violence features for MIL training.
+
+    Structure:
+      features/{video_name}.npy   — (T, D) features per video
+      split lists:
+        train_list.txt / test_list.txt   — lines: "video_name label"
+      GT: test annotations with frame-level binary labels
+
+    Label convention: label=1 for violent, label=0 for normal.
+    """
+    def __init__(self, root, split="train", num_segments=32):
+        self.root = root
+        self.split = split
+        self.num_segments = num_segments
+
+        feat_dir = os.path.join(root, "features")
+        split_file = os.path.join(root, f"{split}_list.txt")
+
+        self.samples = []
+        if os.path.exists(split_file):
+            with open(split_file) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = line.split()
+                    vid_name = parts[0]
+                    label = int(parts[1]) if len(parts) > 1 else 0
+                    feat_path = os.path.join(feat_dir, f"{vid_name}.npy")
+                    if os.path.exists(feat_path):
+                        self.samples.append((feat_path, label, vid_name))
+
+        n_normal = sum(1 for _, l, _ in self.samples if l == 0)
+        n_abnormal = sum(1 for _, l, _ in self.samples if l == 1)
+        print(f"[XD-{split}] Normal: {n_normal} | Abnormal: {n_abnormal} | Total: {len(self.samples)}")
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        path, label, vid_id = self.samples[idx]
+        feat = torch.from_numpy(load_features(path, self.num_segments)).float()
+        return feat, label, vid_id
+
+
+class GenericFeatureDataset(Dataset):
+    """
+    Generic feature dataset that reads from a list file.
+    Supports any pre-extracted feature format (I3D, CLIP, etc).
+
+    List file format (one per line):
+      /path/to/feature.npy label
+    OR
+      relative/path.npy label
+
+    Works with UCF-Crime, ShanghaiTech, and XD-Violence.
+    """
+    def __init__(self, list_file, num_segments=32, feat_root=None):
+        self.num_segments = num_segments
+        self.samples = []
+
+        with open(list_file) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.rsplit(None, 1)
+                if len(parts) == 2:
+                    path, label = parts[0], int(parts[1])
+                else:
+                    path, label = parts[0], 0
+
+                if feat_root and not os.path.isabs(path):
+                    path = os.path.join(feat_root, path)
+
+                vid_id = os.path.splitext(os.path.basename(path))[0]
+                if os.path.exists(path):
+                    self.samples.append((path, label, vid_id))
+
+        n_n = sum(1 for _, l, _ in self.samples if l == 0)
+        n_a = sum(1 for _, l, _ in self.samples if l == 1)
+        print(f"[GenericDataset] Normal: {n_n} | Abnormal: {n_a} | Total: {len(self.samples)}")
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        path, label, vid_id = self.samples[idx]
+        feat = torch.from_numpy(load_features(path, self.num_segments)).float()
+        return feat, label, vid_id
 

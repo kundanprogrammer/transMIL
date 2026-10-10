@@ -10,7 +10,8 @@ from src.models.sultani import MILClassifier
 from src.models.rtfm import RTFMClassifier
 from src.models.umil import UMILClassifier, UMILLoss
 from src.models.pemil import PEMILClassifier
-from src.utils.losses import MILRankingLoss
+from src.models.efficientvad import EfficientVAD
+from src.utils.losses import MILRankingLoss, EfficientVADLoss
 from src.utils.evaluation import evaluate_mil, temporal_localization_eval
 
 def get_model(model_name, feat_dim=1024, hidden_dim=512, dropout=0.6):
@@ -24,6 +25,8 @@ def get_model(model_name, feat_dim=1024, hidden_dim=512, dropout=0.6):
         return UMILClassifier(feat_dim=feat_dim, hidden_dim=hidden_dim, dropout=dropout)
     elif model_name.lower() == "pemil":
         return PEMILClassifier(feat_dim=feat_dim, hidden_dim=hidden_dim, dropout=dropout, n_prototypes=13)
+    elif model_name.lower() == "efficientvad":
+        return EfficientVAD(feat_dim=feat_dim, bottleneck_dim=128, hidden_dim=128, dropout=dropout)
     else:
         raise ValueError(f"Unknown model: {model_name}")
 
@@ -38,6 +41,10 @@ def train_epoch(model, dataloader, optimizer, criterion, device, model_name):
             anom_scores, anom_proj = model(anom_feat, return_proj=True)
             norm_scores, norm_proj = model(norm_feat, return_proj=True)
             loss, *_ = criterion(anom_scores, norm_scores, anom_proj, norm_proj)
+        elif model_name.lower() == "efficientvad":
+            anom_scores, anom_mags = model(anom_feat)
+            norm_scores, norm_mags = model(norm_feat)
+            loss, _ = criterion(anom_scores, norm_scores, anom_mags, norm_mags)
         else:
             anom_scores = model(anom_feat)
             norm_scores = model(norm_feat)
@@ -52,7 +59,7 @@ def train_epoch(model, dataloader, optimizer, criterion, device, model_name):
 def main():
     parser = argparse.ArgumentParser(description="Train VAD models")
     parser.add_argument("--dataset", type=str, choices=["sht", "ucf"], default="sht", help="Dataset to use")
-    parser.add_argument("--model", type=str, choices=["transmil", "sultani", "rtfm", "umil", "pemil"], default="transmil", help="Model to train")
+    parser.add_argument("--model", type=str, choices=["transmil", "sultani", "rtfm", "umil", "pemil", "efficientvad"], default="transmil", help="Model to train")
     parser.add_argument("--epochs", type=int, default=120)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=5e-4)
@@ -71,6 +78,8 @@ def main():
     
     if args.model.lower() == "umil":
         criterion = UMILLoss()
+    elif args.model.lower() == "efficientvad":
+        criterion = EfficientVADLoss()
     else:
         criterion = MILRankingLoss()
 
