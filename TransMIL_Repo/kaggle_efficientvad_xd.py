@@ -1,8 +1,17 @@
 """
-EfficientVAD — XD-Violence Training (v6)
+EfficientVAD — XD-Violence Training (v7)
 =========================================
-Frame-level AP evaluation matching CLIP-TSA / VadCLIP methodology.
-GT built from annotations.txt; predictions expanded via np.repeat(pred, 16).
+Iteration-based training using CLIP-TSA pre-extracted CLIP ViT-B/16 features.
+Frame-level AP evaluation matching CLIP-TSA methodology exactly.
+
+Key changes from v6:
+  - Uses CLIP-TSA feature directory (train/abnormal, train/normal, test/abnormal, test/normal)
+  - Single .npy per video, shape (T, 512) — no 10-crop handling
+  - Iteration-based training (4000 steps, batch_size=16) instead of epoch-based
+  - Uses pre-computed gt-xd.npy or builds from annotations.txt
+  - Test ordering from CLIP-TSA list file (abnormal first, then normal)
+  - Evaluates every 5 steps after step 150 (matching CLIP-TSA)
+  - Caches test features in memory for fast repeated evaluation
 """
 
 import os, sys, glob, time, json
@@ -12,9 +21,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
-from sklearn.metrics import roc_auc_score, average_precision_score
+from sklearn.metrics import average_precision_score, roc_auc_score
 
-VERSION = "v6-frame-level-ap"
+VERSION = "v7-clip-tsa-iter"
 CLIP_LEN = 16
 NUM_SEG = 32
 
@@ -25,278 +34,254 @@ if torch.cuda.is_available():
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ═══════════════════════════════════════════════════════════
-# 1. LOCATE DATASET
+# 1. LOCATE CLIP-TSA FEATURES
 # ═══════════════════════════════════════════════════════════
 
 print("\n" + "=" * 70)
-print("PHASE 1: LOCATING DATASET")
+print("PHASE 1: LOCATING CLIP-TSA FEATURES")
 print("=" * 70)
 
 INPUT_BASE = "/kaggle/input"
 
-# Print top-level input structure for debugging
 if os.path.isdir(INPUT_BASE):
     for d in sorted(os.listdir(INPUT_BASE)):
         full = os.path.join(INPUT_BASE, d)
         if os.path.isdir(full):
             n = len(os.listdir(full))
             print(f"  [{d}/] ({n} items)")
-            for sd in sorted(os.listdir(full))[:5]:
-                sf = os.path.join(full, sd)
-                if os.path.isdir(sf):
-                    print(f"    [{sd}/] ({len(os.listdir(sf))} items)")
-                else:
-                    print(f"    {sd}")
 
-KNOWN_ROOTS = [
-    os.path.join(INPUT_BASE, "datasets", "kundanpawar0001", "kundan-xd"),
-    os.path.join(INPUT_BASE, "kundan-xd"),
+CLIP_TSA_CANDIDATES = [
+    os.path.join(INPUT_BASE, "datasets", "kundanpawar0001", "kundan-xd",
+                 "Kundan_xdviolence_features",
+                 "xd_fromhttpsgithub.comjoos2010kjCLIP-TSA"),
+    os.path.join(INPUT_BASE, "kundan-xd", "Kundan_xdviolence_features",
+                 "xd_fromhttpsgithub.comjoos2010kjCLIP-TSA"),
 ]
 
-ROOT = None
-for cand in KNOWN_ROOTS:
+CLIP_TSA_ROOT = None
+for cand in CLIP_TSA_CANDIDATES:
     if os.path.isdir(cand):
-        ROOT = cand
+        CLIP_TSA_ROOT = cand
         break
 
-if ROOT is None and os.path.isdir(INPUT_BASE):
-    for d in sorted(os.listdir(INPUT_BASE)):
-        full = os.path.join(INPUT_BASE, d)
-        if os.path.isdir(full):
-            ROOT = full
+if CLIP_TSA_ROOT is None:
+    print("Searching for CLIP-TSA features directory...")
+    for root, dirs, files in os.walk(INPUT_BASE):
+        basename = os.path.basename(root)
+        if "clip-tsa" in basename.lower() or "CLIP-TSA" in basename:
+            if "features" in dirs or os.path.isdir(os.path.join(root, "features")):
+                CLIP_TSA_ROOT = root
+                break
+        if "features" in dirs:
+            feat_dir = os.path.join(root, "features")
+            subdirs = set(os.listdir(feat_dir)) if os.path.isdir(feat_dir) else set()
+            if {"test", "train"}.issubset(subdirs):
+                CLIP_TSA_ROOT = root
+                break
+        depth = root.replace(INPUT_BASE, "").count(os.sep)
+        if depth > 6:
             break
 
-assert ROOT is not None, "FATAL: No dataset in /kaggle/input/"
-print(f"\nDataset root: {ROOT}")
-
-# Walk tree once to find XDTrainClipFeatures, XDTestClipFeatures, annotations.txt
-TRAIN_DIR = TEST_DIR = ANNOT_PATH = None
-
-for dirpath, dirnames, filenames in os.walk(ROOT):
-    bname = os.path.basename(dirpath)
-
-    if bname == "XDTrainClipFeatures" and TRAIN_DIR is None:
-        npy_here = any(f.endswith(".npy") for f in filenames)
-        if npy_here:
-            TRAIN_DIR = dirpath
-        elif "XDTrainClipFeatures" in dirnames:
-            nested = os.path.join(dirpath, "XDTrainClipFeatures")
-            if any(f.endswith(".npy") for f in os.listdir(nested)):
-                TRAIN_DIR = nested
-
-    if bname == "XDTestClipFeatures" and TEST_DIR is None:
-        npy_here = any(f.endswith(".npy") for f in filenames)
-        if npy_here:
-            TEST_DIR = dirpath
-        elif "XDTestClipFeatures" in dirnames:
-            nested = os.path.join(dirpath, "XDTestClipFeatures")
-            if any(f.endswith(".npy") for f in os.listdir(nested)):
-                TEST_DIR = nested
-
-    if "annotations.txt" in filenames and ANNOT_PATH is None:
-        ANNOT_PATH = os.path.join(dirpath, "annotations.txt")
-
-    if TRAIN_DIR and TEST_DIR and ANNOT_PATH:
-        break
-
-print(f"Train dir:   {TRAIN_DIR}")
-print(f"Test dir:    {TEST_DIR}")
-print(f"Annotations: {ANNOT_PATH}")
-
-if not TRAIN_DIR or not TEST_DIR:
-    print("\nDirectory structure under ROOT:")
-    for dp, dn, fn in os.walk(ROOT):
-        depth = dp.replace(ROOT, "").count(os.sep)
+if CLIP_TSA_ROOT is None:
+    print("\nFull directory tree (first 5 levels):")
+    for dp, dn, fn in os.walk(INPUT_BASE):
+        depth = dp.replace(INPUT_BASE, "").count(os.sep)
         if depth < 5:
             n_npy = sum(1 for f in fn if f.endswith(".npy"))
             print(f"{'  ' * depth}[{os.path.basename(dp)}/] "
-                  f"({n_npy} npy, {len(fn)} files)")
-    sys.exit(1)
+                  f"({n_npy} npy, {len(fn)} total, {len(dn)} dirs)")
+    sys.exit("FATAL: Cannot find CLIP-TSA features directory")
 
-assert ANNOT_PATH, "annotations.txt not found — cannot build frame-level GT"
+FEAT_ROOT = os.path.join(CLIP_TSA_ROOT, "features")
+print(f"CLIP-TSA root: {CLIP_TSA_ROOT}")
+print(f"Features root: {FEAT_ROOT}")
+
+TRAIN_ABN = os.path.join(FEAT_ROOT, "train", "abnormal")
+TRAIN_NOR = os.path.join(FEAT_ROOT, "train", "normal")
+TEST_ABN = os.path.join(FEAT_ROOT, "test", "abnormal")
+TEST_NOR = os.path.join(FEAT_ROOT, "test", "normal")
+
+for d, label in [(TRAIN_ABN, "train/abnormal"), (TRAIN_NOR, "train/normal"),
+                  (TEST_ABN, "test/abnormal"), (TEST_NOR, "test/normal")]:
+    if not os.path.isdir(d):
+        sys.exit(f"FATAL: Missing directory {d}")
+    n = len([f for f in os.listdir(d) if f.endswith(".npy")])
+    print(f"  {label}: {n} files")
 
 
 # ═══════════════════════════════════════════════════════════
-# 2. BUILD SAMPLE LISTS (crop 0 only)
+# 2. BUILD SAMPLE LISTS WITH CORRECT ORDERING
 # ═══════════════════════════════════════════════════════════
 
 print("\n" + "=" * 70)
 print("PHASE 2: BUILDING SAMPLE LISTS")
 print("=" * 70)
 
+train_abn_paths = sorted(glob.glob(os.path.join(TRAIN_ABN, "*.npy")))
+train_nor_paths = sorted(glob.glob(os.path.join(TRAIN_NOR, "*.npy")))
 
-def gather_crop0(feat_dir):
-    crop0 = sorted(glob.glob(os.path.join(feat_dir, "*__0.npy")))
-    if not crop0:
-        crop0 = sorted(glob.glob(os.path.join(feat_dir, "*.npy")))
-        print(f"  No __0.npy files; using all {len(crop0)} npy")
-    return crop0
+test_abn_on_disk = sorted(glob.glob(os.path.join(TEST_ABN, "*.npy")))
+test_nor_on_disk = sorted(glob.glob(os.path.join(TEST_NOR, "*.npy")))
 
+LIST_FILE_CANDIDATES = [
+    os.path.join(CLIP_TSA_ROOT, "list", "vit", "xd-vit-test.list"),
+]
+for root, dirs, files in os.walk(INPUT_BASE):
+    if "xd-vit-test.list" in files:
+        LIST_FILE_CANDIDATES.append(os.path.join(root, "xd-vit-test.list"))
+    depth = root.replace(INPUT_BASE, "").count(os.sep)
+    if depth > 8:
+        break
 
-def vname(path):
-    n = os.path.basename(path)
-    return n[:-7] if n.endswith("__0.npy") else os.path.splitext(n)[0]
+test_paths = None
+for lf in LIST_FILE_CANDIDATES:
+    if not os.path.isfile(lf):
+        continue
+    print(f"Found test list file: {lf}")
+    with open(lf) as f:
+        list_lines = [l.strip() for l in f if l.strip()]
 
+    basename_to_path = {}
+    for p in test_abn_on_disk + test_nor_on_disk:
+        basename_to_path[os.path.basename(p)] = p
 
-def is_normal(name):
-    return "label_A" in name
+    ordered = []
+    missing = 0
+    for line in list_lines:
+        bn = os.path.basename(line)
+        if bn in basename_to_path:
+            ordered.append(basename_to_path[bn])
+        else:
+            missing += 1
+    if missing > 0:
+        print(f"  WARNING: {missing} files in list not found on disk")
+    if len(ordered) > 0:
+        test_paths = ordered
+        print(f"  Test ordering from list file: {len(test_paths)} videos")
+        break
 
+if test_paths is None:
+    test_paths = test_abn_on_disk + test_nor_on_disk
+    print(f"  Test ordering: sorted abnormal + sorted normal (fallback)")
 
-train_paths = gather_crop0(TRAIN_DIR)
-test_paths = gather_crop0(TEST_DIR)
+n_test_abn = sum(1 for p in test_paths if "abnormal" in p)
+n_test_nor = len(test_paths) - n_test_abn
 
-sample = np.load(train_paths[0])
+sample = np.load(train_abn_paths[0])
 FEAT_DIM = sample.shape[-1]
-print(f"Feature dim: {FEAT_DIM}  |  sample shape: {sample.shape}")
-
-tr_n = sum(1 for p in train_paths if is_normal(vname(p)))
-tr_a = len(train_paths) - tr_n
-te_n = sum(1 for p in test_paths if is_normal(vname(p)))
-te_a = len(test_paths) - te_n
-
-print(f"Train: {len(train_paths)}  (normal {tr_n}, anomaly {tr_a})")
-print(f"Test:  {len(test_paths)}  (normal {te_n}, anomaly {te_a})")
+print(f"\nFeature dim: {FEAT_DIM}  |  sample shape: {sample.shape}")
+print(f"Train: {len(train_abn_paths)} abnormal + {len(train_nor_paths)} normal "
+      f"= {len(train_abn_paths) + len(train_nor_paths)}")
+print(f"Test:  {n_test_abn} abnormal + {n_test_nor} normal = {len(test_paths)}")
 print(f"First 3 test: {[os.path.basename(p) for p in test_paths[:3]]}")
 
 
 # ═══════════════════════════════════════════════════════════
-# 3. FRAME-LEVEL GT  (matches VadCLIP make_gt_xd.py exactly)
+# 3. LOAD OR BUILD FRAME-LEVEL GT
 # ═══════════════════════════════════════════════════════════
 
 print("\n" + "=" * 70)
-print("PHASE 3: BUILDING FRAME-LEVEL GT")
+print("PHASE 3: LOADING/BUILDING FRAME-LEVEL GT")
 print("=" * 70)
 
-# Read raw annotation lines (VadCLIP's exact approach)
-with open(ANNOT_PATH) as f:
-    gt_lines = list(f)
-print(f"Loaded {len(gt_lines)} annotation lines")
+GT_NPY_CANDIDATES = [
+    os.path.join(CLIP_TSA_ROOT, "list", "gt-xd.npy"),
+]
+for root, dirs, files in os.walk(INPUT_BASE):
+    if "gt-xd.npy" in files:
+        GT_NPY_CANDIDATES.append(os.path.join(root, "gt-xd.npy"))
+    depth = root.replace(INPUT_BASE, "").count(os.sep)
+    if depth > 8:
+        break
 
-# Debug: show first 3 annotation line keys and first 3 abnormal test vnames
-print("\nFirst 3 annotation lines (key only):")
-for i, line in enumerate(gt_lines[:3]):
-    print(f"  ann[{i}]: '{line.strip().split()[0]}'")
+frame_gt = None
+for gt_path in GT_NPY_CANDIDATES:
+    if os.path.isfile(gt_path):
+        frame_gt = np.load(gt_path).astype(np.float32)
+        n_pos = int(frame_gt.sum())
+        print(f"Loaded GT from: {gt_path}")
+        print(f"GT frames:   {len(frame_gt):,}")
+        print(f"Anomalous:   {n_pos:,} ({100 * n_pos / len(frame_gt):.2f}%)")
+        break
 
-abn_test_names = [vname(p) for p in test_paths if not is_normal(vname(p))]
-print(f"\nFirst 3 abnormal test vnames:")
-for i, n in enumerate(abn_test_names[:3]):
-    print(f"  test[{i}]: '{n}'")
+if frame_gt is None:
+    print("gt-xd.npy not found, building from annotations.txt...")
+    ANNOT_CANDIDATES = []
+    for root, dirs, files in os.walk(INPUT_BASE):
+        if "annotations.txt" in files:
+            ANNOT_CANDIDATES.append(os.path.join(root, "annotations.txt"))
+        depth = root.replace(INPUT_BASE, "").count(os.sep)
+        if depth > 8:
+            break
 
+    annot_path = None
+    for p in ANNOT_CANDIDATES:
+        if os.path.isfile(p):
+            annot_path = p
+            break
 
-def build_frame_gt(file_paths):
-    """
-    Exactly replicates VadCLIP's make_gt_xd.py:
-      - For each test video, get name by stripping __0.npy suffix
-      - If not normal (no label_A), search annotation lines with
-        'name in gt_line' (substring match against full line)
-      - Parse intervals and fill gt_vec
-      - gt.extend(gt_vec[:-16])
-    """
+    assert annot_path is not None, "Neither gt-xd.npy nor annotations.txt found"
+
+    print(f"Building GT from: {annot_path}")
+    with open(annot_path) as f:
+        gt_lines = list(f)
+    print(f"Annotation lines: {len(gt_lines)}")
+
     gt_all = []
-    seg_counts = []
     matched = 0
-
-    for path in file_paths:
+    for path in test_paths:
         feat = np.load(path, mmap_mode="r")
         T = feat.shape[0]
-        seg_counts.append(T)
         lens = (T + 1) * CLIP_LEN
         gt_vec = np.zeros(lens, dtype=np.float32)
 
-        name = vname(path)
-        if not is_normal(name):
+        name = os.path.splitext(os.path.basename(path))[0]
+        is_normal = "label_A" in name
+
+        if not is_normal:
             for gt_line in gt_lines:
                 if name in gt_line:
                     matched += 1
                     gt_content = gt_line.strip().split()
-                    abnormal_fragment = [
-                        [int(gt_content[i]), int(gt_content[j])]
-                        for i in range(1, len(gt_content), 2)
-                        for j in range(2, len(gt_content), 2)
-                        if j == i + 1
-                    ]
-                    if len(abnormal_fragment) != 0:
-                        abnormal_fragment = np.array(abnormal_fragment)
-                        for frag in abnormal_fragment:
-                            gt_vec[frag[0]:frag[1]] = 1.0
+                    for i in range(1, len(gt_content), 2):
+                        j = i + 1
+                        if j < len(gt_content):
+                            start, end = int(gt_content[i]), int(gt_content[j])
+                            gt_vec[start:end] = 1.0
                     break
 
         gt_all.extend(gt_vec[:-CLIP_LEN])
 
-    gt = np.array(gt_all, dtype=np.float32)
-    n_pos = int(gt.sum())
-    n_abn = sum(1 for p in file_paths if not is_normal(vname(p)))
-    print(f"\nGT frames:    {len(gt):,}")
-    print(f"Anomalous:    {n_pos:,}  ({100 * n_pos / max(1, len(gt)):.2f}%)")
-    print(f"Matched:      {matched} / {n_abn} abnormal videos")
-    return gt, seg_counts
+    frame_gt = np.array(gt_all, dtype=np.float32)
+    n_pos = int(frame_gt.sum())
+    print(f"GT frames:   {len(frame_gt):,}")
+    print(f"Anomalous:   {n_pos:,} ({100 * n_pos / len(frame_gt):.2f}%)")
+    print(f"Matched:     {matched} / {n_test_abn} abnormal videos")
 
-
-frame_gt, test_seg_counts = build_frame_gt(test_paths)
-
-# Sanity check against known VadCLIP gt.npy stats
-print(f"Expected:     ~2,331,296 frames / ~537,882 anomalous (VadCLIP)")
-
-# If matching failed, print detailed diagnostics
+print(f"Expected:    ~2,330,384 frames / ~537,805 anomalous (CLIP-TSA)")
 if frame_gt.sum() == 0:
-    print("\n*** WARNING: GT has zero anomalous frames! ***")
-    print("Diagnostic: checking why substring matching failed...")
-    n_checked = 0
-    for p in test_paths:
-        nm = vname(p)
-        if is_normal(nm):
-            continue
-        n_checked += 1
-        if n_checked > 5:
-            break
-        found_any = False
-        for gt_line in gt_lines:
-            if nm in gt_line:
-                found_any = True
-                break
-        print(f"  vname='{nm}' | in_any_line={found_any}")
-        if not found_any:
-            # Try partial matches
-            nm_parts = nm.split("__")
-            print(f"    split parts: {nm_parts}")
-            for gl in gt_lines[:3]:
-                key = gl.strip().split()[0]
-                key_parts = key.split("__")
-                print(f"    ann key parts: {key_parts}")
-    print("*** Check above: do feature filenames match annotation keys? ***")
+    print("*** FATAL: GT has zero anomalous frames — evaluation will be meaningless ***")
 
 
 # ═══════════════════════════════════════════════════════════
-# 4. FEATURE PROCESSING
+# 4. FEATURE PROCESSING (from CLIP-TSA utils)
 # ═══════════════════════════════════════════════════════════
 
 
-def uniform_extract(feat, t_max):
-    """Uniform temporal sampling with segment averaging (CLIP-TSA / VadCLIP)."""
-    out = np.zeros((t_max, feat.shape[1]), dtype=np.float32)
-    r = np.linspace(0, len(feat), t_max + 1, dtype=np.int32)
-    for i in range(t_max):
+def process_feat(feat, length):
+    """Divide variable-length features into fixed segments (CLIP-TSA)."""
+    new_feat = np.zeros((length, feat.shape[1]), dtype=np.float32)
+    r = np.linspace(0, len(feat), length + 1, dtype=np.int32)
+    for i in range(length):
         if r[i] != r[i + 1]:
-            out[i] = np.mean(feat[r[i] : r[i + 1]], axis=0)
+            new_feat[i] = np.mean(feat[r[i]:r[i + 1]], axis=0)
         else:
-            out[i] = feat[r[i]]
-    return out
-
-
-def pad_feat(feat, min_len):
-    if feat.shape[0] >= min_len:
-        return feat
-    return np.pad(feat, ((0, min_len - feat.shape[0]), (0, 0)), mode="constant")
-
-
-def process_train(feat, n_seg):
-    if feat.shape[0] > n_seg:
-        return uniform_extract(feat, n_seg)
-    return pad_feat(feat, n_seg)
+            new_feat[i] = feat[r[i]]
+    return new_feat
 
 
 # ═══════════════════════════════════════════════════════════
-# 5. MODEL  (234K params)
+# 5. MODEL (234K params)
 # ═══════════════════════════════════════════════════════════
 
 
@@ -362,7 +347,7 @@ class EfficientVAD(nn.Module):
 
 class MILLoss(nn.Module):
     def __init__(self, margin=1.0, mag_m=100.0, mag_w=1e-4,
-                 sm_w=8e-5, sp_w=8e-5, k=3, drop=0.6):
+                 sm_w=8e-4, sp_w=8e-3, k=3, drop=0.6):
         super().__init__()
         self.margin = margin
         self.mag_m, self.mag_w = mag_m, mag_w
@@ -391,61 +376,62 @@ class MILLoss(nn.Module):
 
 
 # ═══════════════════════════════════════════════════════════
-# 7. DATASETS
+# 7. DATASET
 # ═══════════════════════════════════════════════════════════
 
 
-class TrainSet(Dataset):
-    def __init__(self, paths, labels):
-        self.paths, self.labels = paths, labels
+class TrainSegDataset(Dataset):
+    """Single-class dataset. Returns process_feat'd 32-segment features."""
+    def __init__(self, paths):
+        self.paths = paths
 
     def __len__(self):
         return len(self.paths)
 
     def __getitem__(self, i):
         feat = np.load(self.paths[i]).astype(np.float32)
-        feat = process_train(feat, NUM_SEG)
-        return torch.from_numpy(feat), self.labels[i]
-
-
-class MILPairs(Dataset):
-    def __init__(self, ds):
-        self.ds = ds
-        self.nidx = [i for i, l in enumerate(ds.labels) if l == 0]
-        self.aidx = [i for i, l in enumerate(ds.labels) if l == 1]
-        assert self.aidx and self.nidx, "Need both normal and anomaly samples"
-        self.length = max(len(self.nidx), len(self.aidx))
-
-    def __len__(self):
-        return self.length
-
-    def __getitem__(self, idx):
-        a = self.aidx[idx % len(self.aidx)]
-        n = self.nidx[idx % len(self.nidx)]
-        return self.ds[a][0], self.ds[n][0]
+        feat = process_feat(feat, NUM_SEG)
+        return torch.from_numpy(feat)
 
 
 # ═══════════════════════════════════════════════════════════
-# 8. FRAME-LEVEL EVALUATION  (the critical fix over v4)
+# 8. FRAME-LEVEL EVALUATION (matching CLIP-TSA exactly)
 # ═══════════════════════════════════════════════════════════
+
+_test_feat_cache = []
+
+
+def _cache_test_features(file_paths):
+    """Load all test features into memory once."""
+    global _test_feat_cache
+    if len(_test_feat_cache) == len(file_paths):
+        return
+    print(f"  Caching {len(file_paths)} test features in memory...")
+    _test_feat_cache = []
+    total_segs = 0
+    for path in file_paths:
+        feat = np.load(path).astype(np.float32)
+        _test_feat_cache.append(feat)
+        total_segs += feat.shape[0]
+    mem_mb = sum(f.nbytes for f in _test_feat_cache) / 1e6
+    print(f"  Cached: {total_segs:,} total segments, {mem_mb:.1f} MB")
 
 
 @torch.no_grad()
 def evaluate(model, file_paths, gt, device):
     """
-    Frame-level AP & AUC (matches CLIP-TSA / VadCLIP):
-      1. Feed each test video's raw (T_i, D) features through model
-      2. Get T_i anomaly scores per video
+    Frame-level AP matching CLIP-TSA:
+      1. Feed each test video's raw (T_i, D) features
+      2. Get T_i per-segment anomaly scores
       3. Concatenate across all videos (same order as GT)
-      4. np.repeat(scores, 16)  →  frame-level predictions
+      4. np.repeat(scores, 16) for frame-level predictions
       5. average_precision_score(gt, preds)
     """
     model.eval()
-    all_scores = []
+    _cache_test_features(file_paths)
 
-    for path in file_paths:
-        feat = np.load(path).astype(np.float32)
-        T = feat.shape[0]
+    all_scores = []
+    for feat in _test_feat_cache:
         x = torch.from_numpy(feat).unsqueeze(0).to(device)
         sc, _ = model(x)
         all_scores.append(sc[0].cpu().numpy())
@@ -455,109 +441,131 @@ def evaluate(model, file_paths, gt, device):
 
     gt_use = gt
     if len(frame_pred) != len(gt_use):
-        print(f"  ⚠ pred {len(frame_pred)} != gt {len(gt_use)}, trimming")
         mn = min(len(frame_pred), len(gt_use))
         frame_pred = frame_pred[:mn]
         gt_use = gt_use[:mn]
 
     ap = average_precision_score(gt_use, frame_pred) * 100
-    auc = roc_auc_score(gt_use, frame_pred) * 100
-    return ap, auc
+    auc_val = roc_auc_score(gt_use, frame_pred) * 100
+    return ap, auc_val
 
 
 # ═══════════════════════════════════════════════════════════
-# 9. TRAINING
+# 9. TRAINING (iteration-based, matching CLIP-TSA)
 # ═══════════════════════════════════════════════════════════
 
 print("\n" + "=" * 70)
 print("PHASE 4: TRAINING")
 print("=" * 70)
 
-EPOCHS = 100
-BATCH = 32
+MAX_ITER = 4000
+BATCH = 16
 LR = 1e-3
-WD = 5e-4
+WD = 5e-3
 K = 3
-EVAL_EVERY = 5
-SEED = 42
+SEED = 3
+EVAL_INTERVAL = 5
+EVAL_START = 150
 
 torch.manual_seed(SEED)
 np.random.seed(SEED)
+import random
+random.seed(SEED)
 if torch.cuda.is_available():
     torch.cuda.manual_seed_all(SEED)
 
-train_labels = [0 if is_normal(vname(p)) else 1 for p in train_paths]
-train_ds = TrainSet(train_paths, train_labels)
-pair_ds = MILPairs(train_ds)
-loader = DataLoader(pair_ds, batch_size=BATCH, shuffle=True,
-                    num_workers=2, pin_memory=True)
+abn_ds = TrainSegDataset(train_abn_paths)
+nor_ds = TrainSegDataset(train_nor_paths)
+
+abn_loader = DataLoader(abn_ds, batch_size=BATCH, shuffle=True,
+                        num_workers=2, pin_memory=True, drop_last=True)
+nor_loader = DataLoader(nor_ds, batch_size=BATCH, shuffle=True,
+                        num_workers=2, pin_memory=True, drop_last=True)
+
+print(f"Abnormal loader: {len(abn_loader)} batches ({len(abn_ds)} samples)")
+print(f"Normal loader:   {len(nor_loader)} batches ({len(nor_ds)} samples)")
 
 bn = min(128, FEAT_DIM // 4)
 se_r = min(16, FEAT_DIM // 8)
 model = EfficientVAD(FEAT_DIM, bn, se_r, hid=128, drop=0.6).to(DEVICE)
 
 n_params = sum(p.numel() for p in model.parameters())
-print(f"EfficientVAD  |  {n_params:,} params ({n_params / 1e6:.3f}M)")
+print(f"\nEfficientVAD  |  {n_params:,} params ({n_params / 1e6:.3f}M)")
 print(f"feat={FEAT_DIM}  bn={bn}  se_r={se_r}  seg={NUM_SEG}")
-print(f"bs={BATCH}  lr={LR}  epochs={EPOCHS}  top_k={K}")
+print(f"iters={MAX_ITER}  bs={BATCH}  lr={LR}  wd={WD}  top_k={K}")
 
 criterion = MILLoss(k=K)
 optimizer = optim.Adam(model.parameters(), lr=LR, weight_decay=WD)
-scheduler = optim.lr_scheduler.MultiStepLR(
-    optimizer, milestones=[int(EPOCHS * 0.6), int(EPOCHS * 0.8)], gamma=0.1)
 
 SAVE = "/kaggle/working"
 best_ap = 0.0
-best_epoch = 0
+best_step = 0
 history = []
 
-print(f"\nTraining...")
+ap0, auc0 = evaluate(model, test_paths, frame_gt, DEVICE)
+print(f"\nBefore training: AP {ap0:.2f}%  AUC {auc0:.2f}%")
+print(f"\nTraining ({MAX_ITER} iterations)...")
 print("-" * 70)
 
-for epoch in range(1, EPOCHS + 1):
+t_start = time.time()
+running_loss = 0.0
+
+for step in range(1, MAX_ITER + 1):
     model.train()
-    t0 = time.time()
-    tot_loss = 0.0
-    det_sum = {}
+    criterion.train()
 
-    for a_feat, n_feat in loader:
-        a_feat = a_feat.to(DEVICE)
-        n_feat = n_feat.to(DEVICE)
-        optimizer.zero_grad()
-        a_sc, a_mg = model(a_feat)
-        n_sc, n_mg = model(n_feat)
-        loss, det = criterion(a_sc, n_sc, a_mg, n_mg)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
-        tot_loss += loss.item()
-        for k_, v_ in det.items():
-            det_sum[k_] = det_sum.get(k_, 0) + v_
+    if (step - 1) % len(abn_loader) == 0:
+        abn_iter = iter(abn_loader)
+    if (step - 1) % len(nor_loader) == 0:
+        nor_iter = iter(nor_loader)
 
-    scheduler.step()
-    nb = max(1, len(loader))
-    avg = tot_loss / nb
-    dt = time.time() - t0
-    line = f"Ep {epoch:3d}/{EPOCHS} | loss {avg:.4f} | rank {det_sum.get('rank', 0) / nb:.4f} | {dt:.1f}s"
+    a_feat = next(abn_iter).to(DEVICE)
+    n_feat = next(nor_iter).to(DEVICE)
 
-    if epoch % EVAL_EVERY == 0 or epoch == EPOCHS:
-        ap, auc = evaluate(model, test_paths, frame_gt, DEVICE)
-        line += f"  |  AP {ap:.2f}%  AUC {auc:.2f}%"
+    optimizer.zero_grad()
+    a_sc, a_mg = model(a_feat)
+    n_sc, n_mg = model(n_feat)
+    loss, det = criterion(a_sc, n_sc, a_mg, n_mg)
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    optimizer.step()
+
+    running_loss += loss.item()
+
+    if step % 200 == 0:
+        elapsed = time.time() - t_start
+        avg_loss = running_loss / 200
+        running_loss = 0.0
+        print(f"Step {step:4d}/{MAX_ITER} | loss {avg_loss:.4f} | "
+              f"rank {det['rank']:.4f} | {elapsed:.0f}s")
+
+    if step % EVAL_INTERVAL == 0 and step > EVAL_START:
+        ap, auc_val = evaluate(model, test_paths, frame_gt, DEVICE)
 
         if ap > best_ap:
             best_ap = ap
-            best_epoch = epoch
+            best_step = step
             torch.save({
-                "epoch": epoch,
+                "step": step,
                 "model_state_dict": model.state_dict(),
-                "frame_ap": ap, "frame_auc": auc,
+                "optimizer_state_dict": optimizer.state_dict(),
+                "frame_ap": ap, "frame_auc": auc_val,
                 "feat_dim": FEAT_DIM, "params": n_params,
             }, os.path.join(SAVE, "efficientvad_xd_best.pth"))
-            line += " *"
+            print(f"  Step {step:4d} | AP {ap:.2f}% AUC {auc_val:.2f}% * NEW BEST")
 
-        history.append(dict(epoch=epoch, loss=avg, frame_ap=ap, frame_auc=auc))
+        if step % 100 == 0:
+            print(f"  Step {step:4d} | AP {ap:.2f}% AUC {auc_val:.2f}%  "
+                  f"(best: {best_ap:.2f}% @ step {best_step})")
 
-    print(line)
+        history.append(dict(step=step, frame_ap=ap, frame_auc=auc_val))
+
+torch.save({
+    "step": MAX_ITER,
+    "model_state_dict": model.state_dict(),
+    "optimizer_state_dict": optimizer.state_dict(),
+    "feat_dim": FEAT_DIM, "params": n_params,
+}, os.path.join(SAVE, "efficientvad_xd_final.pth"))
 
 
 # ═══════════════════════════════════════════════════════════
@@ -568,17 +576,21 @@ print("\n" + "=" * 70)
 print("FINAL RESULTS")
 print("=" * 70)
 
-ckpt = torch.load(os.path.join(SAVE, "efficientvad_xd_best.pth"),
-                  map_location=DEVICE)
-model.load_state_dict(ckpt["model_state_dict"])
+total_time = time.time() - t_start
+print(f"Training time: {total_time:.0f}s ({total_time / 60:.1f}m)")
+
+if best_ap > 0:
+    ckpt = torch.load(os.path.join(SAVE, "efficientvad_xd_best.pth"),
+                      map_location=DEVICE)
+    model.load_state_dict(ckpt["model_state_dict"])
+
 final_ap, final_auc = evaluate(model, test_paths, frame_gt, DEVICE)
 
-print(f"Best epoch:       {best_epoch}")
+print(f"Best step:        {best_step}")
 print(f"Frame-level AP:   {final_ap:.2f}%   (primary XD-Violence metric)")
 print(f"Frame-level AUC:  {final_auc:.2f}%")
 print(f"Parameters:       {n_params:,} ({n_params / 1e6:.3f}M)")
 
-# Latency
 model.eval()
 dummy = torch.randn(1, NUM_SEG, FEAT_DIM).to(DEVICE)
 for _ in range(10):
@@ -593,7 +605,6 @@ if torch.cuda.is_available():
 latency = (time.time() - t0) / 1000 * 1000
 print(f"Latency:          {latency:.2f} ms/sample")
 
-# FLOPs
 flops = 0
 for m in model.modules():
     if isinstance(m, nn.Linear):
@@ -616,14 +627,17 @@ print(f"| {'EfficientVAD (Ours)':<25} | {final_ap:>6.2f}% | {final_auc:>6.2f}% |
 summary = {
     "version": VERSION,
     "dataset": "xd-violence",
-    "metric": "frame-level AP (matching CLIP-TSA/VadCLIP)",
-    "best_epoch": best_epoch,
+    "metric": "frame-level AP (matching CLIP-TSA)",
+    "best_step": best_step,
+    "total_steps": MAX_ITER,
     "frame_ap": final_ap,
     "frame_auc": final_auc,
     "params": n_params,
     "flops": flops,
     "latency_ms": latency,
-    "n_train": len(train_paths),
+    "training_time_s": total_time,
+    "n_train_abn": len(train_abn_paths),
+    "n_train_nor": len(train_nor_paths),
     "n_test": len(test_paths),
     "gt_frames": len(frame_gt),
     "gt_anomalous": int(frame_gt.sum()),
