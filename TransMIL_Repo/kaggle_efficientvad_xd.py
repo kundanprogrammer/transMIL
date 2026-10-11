@@ -1,9 +1,9 @@
 """
-EfficientVAD — XD-Violence Training (v15-working)
-===================================================
-20-iteration sanity check. CLIP-TSA ViT-B/16 features, frame-level AP.
-Validated: test file ordering matches gt-xd.npy (500 abn + 300 nor, alpha-sorted
-within each group). SEED=0 (matching CLIP-TSA XD runner.sh).
+EfficientVAD vs CLIP-TSA -- XD-Violence Comparison (v16)
+========================================================
+Both trained 4000 iterations on same CLIP ViT-B/16 features.
+Metric: frame-level AP (XD-Violence standard).
+CLIP-TSA faithfully reimplemented from https://github.com/joos2010kj/CLIP-TSA.
 """
 import os, sys, traceback
 
@@ -21,14 +21,14 @@ def main():
     from torch.utils.data import Dataset, DataLoader
     from sklearn.metrics import average_precision_score, roc_auc_score
 
-    VERSION = "v15-working-20iter"
+    VERSION = "v16-comparison-4000iter"
     CLIP_LEN = 16
     NUM_SEG = 32
 
-    warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
-    warnings.filterwarnings("ignore", category=FutureWarning, module="sklearn")
+    warnings.filterwarnings("ignore", category=UserWarning)
+    warnings.filterwarnings("ignore", category=FutureWarning)
 
-    print(f"EfficientVAD {VERSION}")
+    print(f"EfficientVAD vs CLIP-TSA  {VERSION}")
     print(f"PyTorch {torch.__version__}  |  CUDA {torch.cuda.is_available()}")
     if torch.cuda.is_available():
         print(f"GPU: {torch.cuda.get_device_name(0)}")
@@ -37,18 +37,17 @@ def main():
         print(f"GPU mem: {mem / 1e9:.1f} GB")
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # ═══════════════════════════════════════════════════════════
+    # ================================================================
     # 1. LOCATE CLIP-TSA FEATURES
-    # ═══════════════════════════════════════════════════════════
+    # ================================================================
 
-    print("\n" + "=" * 70)
-    print("PHASE 1: LOCATING CLIP-TSA FEATURES")
-    print("=" * 70)
+    print("\n" + "=" * 60)
+    print("PHASE 1: LOCATING FEATURES")
+    print("=" * 60)
 
     INPUT_BASE = "/kaggle/input"
 
     if os.path.isdir(INPUT_BASE):
-        print(f"Contents of {INPUT_BASE}:")
         for d in sorted(os.listdir(INPUT_BASE)):
             full = os.path.join(INPUT_BASE, d)
             if os.path.isdir(full):
@@ -59,7 +58,7 @@ def main():
                     if os.path.isdir(subpath):
                         sub_items = os.listdir(subpath)
                         print(f"    [{sub}/] ({len(sub_items)} items)")
-                        for ss in sorted(sub_items)[:5]:
+                        for ss in sorted(sub_items)[:3]:
                             ssp = os.path.join(subpath, ss)
                             if os.path.isdir(ssp):
                                 print(f"      [{ss}/] ({len(os.listdir(ssp))} items)")
@@ -67,8 +66,6 @@ def main():
                                 print(f"      {ss}")
                     else:
                         print(f"    {sub}")
-    else:
-        print(f"WARNING: {INPUT_BASE} does not exist!")
 
     CLIP_TSA_CANDIDATES = [
         os.path.join(INPUT_BASE, "kundan-xd",
@@ -83,13 +80,11 @@ def main():
 
     CLIP_TSA_ROOT = None
     for cand in CLIP_TSA_CANDIDATES:
-        print(f"  Checking: {cand} -> {os.path.isdir(cand)}")
         if os.path.isdir(cand):
             CLIP_TSA_ROOT = cand
             break
 
     if CLIP_TSA_ROOT is None:
-        print("Searching recursively for features directory...")
         for root, dirs, files in os.walk(INPUT_BASE):
             depth = root.replace(INPUT_BASE, "").count(os.sep)
             if depth > 8:
@@ -101,31 +96,24 @@ def main():
                     subdirs = set(os.listdir(feat_dir))
                     if {"test", "train"}.issubset(subdirs):
                         CLIP_TSA_ROOT = root
-                        print(f"  Found via features/test+train: {root}")
                         break
             basename = os.path.basename(root).lower()
             if "clip" in basename and "tsa" in basename:
                 CLIP_TSA_ROOT = root
-                print(f"  Found via name match: {root}")
                 break
             npy_count = sum(1 for f in files if f.endswith(".npy"))
             if npy_count > 50:
                 parent = os.path.dirname(root)
-                grandparent = os.path.dirname(parent)
-                CLIP_TSA_ROOT = grandparent
-                print(f"  Found via npy concentration ({npy_count} files): {root}")
-                print(f"  Using grandparent as root: {grandparent}")
+                CLIP_TSA_ROOT = os.path.dirname(parent)
                 break
 
     if CLIP_TSA_ROOT is None:
-        print("\nFATAL: Cannot find CLIP-TSA features. Full directory tree:")
+        print("FATAL: Cannot find CLIP-TSA features.")
         for dp, dn, fn in os.walk(INPUT_BASE):
             depth = dp.replace(INPUT_BASE, "").count(os.sep)
             if depth < 6:
                 n_npy = sum(1 for f in fn if f.endswith(".npy"))
-                indent = "  " * depth
-                print(f"{indent}[{os.path.basename(dp)}/] "
-                      f"({n_npy} npy, {len(fn)} total, {len(dn)} dirs)")
+                print(f"{'  ' * depth}[{os.path.basename(dp)}/] ({n_npy} npy)")
         sys.exit(1)
 
     FEAT_ROOT = os.path.join(CLIP_TSA_ROOT, "features")
@@ -133,33 +121,29 @@ def main():
         if os.path.isdir(os.path.join(CLIP_TSA_ROOT, "test")):
             FEAT_ROOT = CLIP_TSA_ROOT
         else:
-            print(f"WARNING: {FEAT_ROOT} not found, listing CLIP_TSA_ROOT:")
-            for item in os.listdir(CLIP_TSA_ROOT):
-                print(f"  {item}")
-            sys.exit(1)
+            sys.exit(f"FATAL: {FEAT_ROOT} not found")
 
-    print(f"CLIP-TSA root:  {CLIP_TSA_ROOT}")
-    print(f"Features root:  {FEAT_ROOT}")
+    print(f"Features root: {FEAT_ROOT}")
 
     TRAIN_ABN = os.path.join(FEAT_ROOT, "train", "abnormal")
     TRAIN_NOR = os.path.join(FEAT_ROOT, "train", "normal")
     TEST_ABN = os.path.join(FEAT_ROOT, "test", "abnormal")
     TEST_NOR = os.path.join(FEAT_ROOT, "test", "normal")
 
-    for d, label in [(TRAIN_ABN, "train/abnormal"), (TRAIN_NOR, "train/normal"),
-                      (TEST_ABN, "test/abnormal"), (TEST_NOR, "test/normal")]:
+    for d, label in [(TRAIN_ABN, "train/abn"), (TRAIN_NOR, "train/nor"),
+                      (TEST_ABN, "test/abn"), (TEST_NOR, "test/nor")]:
         if not os.path.isdir(d):
-            sys.exit(f"FATAL: Missing directory {d}")
+            sys.exit(f"FATAL: Missing {d}")
         n = len([f for f in os.listdir(d) if f.endswith(".npy")])
         print(f"  {label}: {n} files")
 
-    # ═══════════════════════════════════════════════════════════
+    # ================================================================
     # 2. BUILD SAMPLE LISTS
-    # ═══════════════════════════════════════════════════════════
+    # ================================================================
 
-    print("\n" + "=" * 70)
-    print("PHASE 2: BUILDING SAMPLE LISTS")
-    print("=" * 70)
+    print("\n" + "=" * 60)
+    print("PHASE 2: SAMPLE LISTS")
+    print("=" * 60)
 
     train_abn_paths = sorted(glob.glob(os.path.join(TRAIN_ABN, "*.npy")))
     train_nor_paths = sorted(glob.glob(os.path.join(TRAIN_NOR, "*.npy")))
@@ -167,44 +151,25 @@ def main():
     test_abn_on_disk = sorted(glob.glob(os.path.join(TEST_ABN, "*.npy")))
     test_nor_on_disk = sorted(glob.glob(os.path.join(TEST_NOR, "*.npy")))
     test_paths = test_abn_on_disk + test_nor_on_disk
-
     n_test_abn = len(test_abn_on_disk)
     n_test_nor = len(test_nor_on_disk)
 
     sample = np.load(train_abn_paths[0])
     FEAT_DIM = sample.shape[-1]
     print(f"Feature dim: {FEAT_DIM}  |  sample shape: {sample.shape}")
-    print(f"Train: {len(train_abn_paths)} abnormal + {len(train_nor_paths)} normal "
-          f"= {len(train_abn_paths) + len(train_nor_paths)}")
-    print(f"Test:  {n_test_abn} abnormal + {n_test_nor} normal = {len(test_paths)}")
-    print(f"First 3 test abn: {[os.path.basename(p) for p in test_paths[:3]]}")
-    print(f"First 3 test nor: {[os.path.basename(p) for p in test_paths[n_test_abn:n_test_abn+3]]}")
-
-    has_hash = any('#' in os.path.basename(p) for p in test_paths[:5])
-    has_triple = any('___' in os.path.basename(p) for p in test_paths[:5])
-    print(f"Naming: '#' in names={has_hash}, '___' in names={has_triple}")
-    if has_triple and not has_hash:
-        print("  Confirmed: Kaggle naming convention (# replaced by _)")
+    print(f"Train: {len(train_abn_paths)} abn + {len(train_nor_paths)} nor")
+    print(f"Test:  {n_test_abn} abn + {n_test_nor} nor = {len(test_paths)}")
 
     if n_test_abn != 500 or n_test_nor != 300:
-        print(f"WARNING: Expected 500 abn + 300 nor, got {n_test_abn} + {n_test_nor}")
-        print("  GT alignment may be wrong! Proceeding but results may be invalid.")
-    else:
-        print("  Test split verified: 500 abnormal + 300 normal (matches gt-xd.npy)")
+        print(f"WARNING: Expected 500+300, got {n_test_abn}+{n_test_nor}")
 
-    sample_segs = [np.load(p).shape[0] for p in test_paths[:10]]
-    avg_segs = np.mean(sample_segs)
-    est_frames = int(avg_segs * len(test_paths) * CLIP_LEN)
-    print(f"  Avg segments/video (sample): {avg_segs:.0f}  |  est frames: ~{est_frames:,}"
-          f"  (GT: 2,330,384)")
+    # ================================================================
+    # 3. LOAD FRAME-LEVEL GT (embedded)
+    # ================================================================
 
-    # ═══════════════════════════════════════════════════════════
-    # 3. LOAD FRAME-LEVEL GT (embedded from CLIP-TSA gt-xd.npy)
-    # ═══════════════════════════════════════════════════════════
-
-    print("\n" + "=" * 70)
-    print("PHASE 3: LOADING FRAME-LEVEL GT")
-    print("=" * 70)
+    print("\n" + "=" * 60)
+    print("PHASE 3: GROUND TRUTH")
+    print("=" * 60)
 
     _GT_XD_B64 = (
         "H4sIAKn/ymoC/+2dTY7jOBJGU+BCSx6BR+HR6KPpKD6CgNl4AME5mOquqrQtksFfUfZ7q0aXU6LI"
@@ -295,7 +260,6 @@ def main():
         "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
         "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAb8D/ADdmYQnicQQA"
     )
-
     GT_XD_NFRAMES = 2330384
 
     def _decode_embedded_gt():
@@ -304,15 +268,12 @@ def main():
 
     frame_gt = _decode_embedded_gt()
     n_pos = int(frame_gt.sum())
-    print(f"Decoded embedded gt-xd.npy")
-    print(f"GT frames:   {len(frame_gt):,}")
-    print(f"Anomalous:   {n_pos:,} ({100 * n_pos / len(frame_gt):.2f}%)")
-    assert n_pos == 537805, f"Expected 537805 anomalous frames, got {n_pos}"
-    assert len(frame_gt) == GT_XD_NFRAMES
+    print(f"GT: {len(frame_gt):,} frames, {n_pos:,} anomalous ({100*n_pos/len(frame_gt):.2f}%)")
+    assert n_pos == 537805 and len(frame_gt) == GT_XD_NFRAMES
 
-    # ═══════════════════════════════════════════════════════════
-    # 4. FEATURE PROCESSING (from CLIP-TSA utils)
-    # ═══════════════════════════════════════════════════════════
+    # ================================================================
+    # 4. UTILS
+    # ================================================================
 
     def process_feat(feat, length):
         new_feat = np.zeros((length, feat.shape[1]), dtype=np.float32)
@@ -324,9 +285,9 @@ def main():
                 new_feat[i] = feat[r[i]]
         return new_feat
 
-    # ═══════════════════════════════════════════════════════════
-    # 5. MODEL (234K params)
-    # ═══════════════════════════════════════════════════════════
+    # ================================================================
+    # 5A. MODEL: EfficientVAD (234K params)
+    # ================================================================
 
     class MultiScaleTemporalConv(nn.Module):
         def __init__(self, d, bn):
@@ -380,9 +341,275 @@ def main():
             mags = torch.norm(h, p=2, dim=-1)
             return scores, mags
 
-    # ═══════════════════════════════════════════════════════════
-    # 6. MIL RANKING LOSS
-    # ═══════════════════════════════════════════════════════════
+    # ================================================================
+    # 5B. MODEL: CLIP-TSA (faithful reimplementation)
+    # ================================================================
+
+    class PerturbedTopKFunction(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, x, k, num_samples=100, sigma=0.05, train_mode=True):
+            b, d = x.shape
+            k = int(d * k)
+            noise = torch.normal(mean=0.0, std=1.0, size=(b, num_samples, d)).to(x.device)
+            perturbed_x = x[:, None, :] + noise * sigma
+            k = max(1, min(k, perturbed_x.shape[-1]))
+            if not train_mode:
+                k = min(1000, k)
+            topk_results = torch.topk(perturbed_x, k=k, dim=-1, sorted=False)
+            indices = torch.sort(topk_results.indices, dim=-1).values
+            perturbed_output = F.one_hot(indices, num_classes=d).float()
+            indicators = perturbed_output.mean(dim=1)
+            ctx.k = k
+            ctx.num_samples = num_samples
+            ctx.sigma = sigma
+            ctx.perturbed_output = perturbed_output
+            ctx.noise = noise
+            return indicators
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            if grad_output is None:
+                return tuple([None] * 5)
+            grad_expected = torch.einsum("bnkd,bne->bkde",
+                                         ctx.perturbed_output, ctx.noise)
+            grad_expected /= (ctx.num_samples * ctx.sigma)
+            grad_input = torch.einsum("bkde,bke->bd",
+                                       grad_expected, grad_output)
+            return (grad_input,) + tuple([None] * 5)
+
+    class PerturbedTopK(nn.Module):
+        def __init__(self, k, num_samples=100, sigma=0.05):
+            super().__init__()
+            self.num_samples = num_samples
+            self.sigma = sigma
+            self.k = k
+
+        def forward(self, x, train_mode):
+            return PerturbedTopKFunction.apply(
+                x, self.k, self.num_samples, self.sigma, train_mode)
+
+    class HAScorer(nn.Module):
+        def __init__(self, input_dim=512):
+            super().__init__()
+            self.fc1 = nn.Linear(input_dim, 256)
+            self.fc2 = nn.Linear(256, 1)
+
+        def forward(self, x):
+            return torch.sigmoid(self.fc2(F.relu(self.fc1(x))))
+
+    class HardAttention(nn.Module):
+        def __init__(self, k=1.0, num_samples=100, input_dim=512):
+            super().__init__()
+            self.scorer = HAScorer(input_dim)
+            self.hard_att = PerturbedTopK(k=k, num_samples=num_samples)
+
+        def forward(self, inputs):
+            scores = self.scorer(inputs)
+            b = scores.size(0)
+            topk = self.hard_att(scores.squeeze(-1), train_mode=(b > 1))
+            out = topk.unsqueeze(-1) * inputs.unsqueeze(1)
+            return torch.sum(out, dim=1)
+
+    class NONLocalBlock1D(nn.Module):
+        def __init__(self, in_channels, inter_channels=None,
+                     sub_sample=False, bn_layer=True):
+            super().__init__()
+            self.in_channels = in_channels
+            self.inter_channels = inter_channels or in_channels // 2
+            if self.inter_channels == 0:
+                self.inter_channels = 1
+
+            self.g = nn.Conv1d(self.in_channels, self.inter_channels, 1)
+            if bn_layer:
+                self.W = nn.Sequential(
+                    nn.Conv1d(self.inter_channels, self.in_channels, 1),
+                    nn.BatchNorm1d(self.in_channels))
+                nn.init.constant_(self.W[1].weight, 0)
+                nn.init.constant_(self.W[1].bias, 0)
+            else:
+                self.W = nn.Conv1d(self.inter_channels, self.in_channels, 1)
+                nn.init.constant_(self.W.weight, 0)
+                nn.init.constant_(self.W.bias, 0)
+            self.theta = nn.Conv1d(self.in_channels, self.inter_channels, 1)
+            self.phi = nn.Conv1d(self.in_channels, self.inter_channels, 1)
+
+            if sub_sample:
+                self.g = nn.Sequential(self.g, nn.MaxPool1d(2))
+                self.phi = nn.Sequential(self.phi, nn.MaxPool1d(2))
+
+        def forward(self, x):
+            B = x.size(0)
+            ic = self.inter_channels
+            g_x = self.g(x).view(B, ic, -1).permute(0, 2, 1)
+            theta_x = self.theta(x).view(B, ic, -1).permute(0, 2, 1)
+            phi_x = self.phi(x).view(B, ic, -1)
+            f = torch.matmul(theta_x, phi_x) / phi_x.size(-1)
+            y = torch.matmul(f, g_x).permute(0, 2, 1).contiguous()
+            y = y.view(B, ic, *x.size()[2:])
+            return self.W(y) + x
+
+    class Aggregate(nn.Module):
+        def __init__(self, len_feature):
+            super().__init__()
+            div = 2048 // len_feature
+            ch = 512 // div
+            ch_full = 2048 // div
+            self.conv_1 = nn.Sequential(
+                nn.Conv1d(len_feature, ch, 3, padding=1, dilation=1),
+                nn.ReLU(), nn.BatchNorm1d(ch))
+            self.conv_2 = nn.Sequential(
+                nn.Conv1d(len_feature, ch, 3, padding=2, dilation=2),
+                nn.ReLU(), nn.BatchNorm1d(ch))
+            self.conv_3 = nn.Sequential(
+                nn.Conv1d(len_feature, ch, 3, padding=4, dilation=4),
+                nn.ReLU(), nn.BatchNorm1d(ch))
+            self.conv_4 = nn.Sequential(
+                nn.Conv1d(ch_full, ch, 1, bias=False), nn.ReLU())
+            self.conv_5 = nn.Sequential(
+                nn.Conv1d(ch_full, ch_full, 3, padding=1, bias=False),
+                nn.ReLU(), nn.BatchNorm1d(ch_full))
+            self.non_local = NONLocalBlock1D(ch, sub_sample=False, bn_layer=True)
+
+        def forward(self, x):
+            out = x.permute(0, 2, 1)
+            residual = out
+            out1 = self.conv_1(out)
+            out2 = self.conv_2(out)
+            out3 = self.conv_3(out)
+            out_d = torch.cat((out1, out2, out3), dim=1)
+            out = self.conv_4(out)
+            out = self.non_local(out)
+            out = torch.cat((out_d, out), dim=1)
+            out = self.conv_5(out)
+            out = out + residual
+            return out.permute(0, 2, 1)
+
+    class DimReductionMLP(nn.Module):
+        def __init__(self, input_dim=512):
+            super().__init__()
+            self.fc1 = nn.Linear(input_dim, 1024)
+            self.fc2 = nn.Linear(1024, 512)
+
+        def forward(self, x):
+            return torch.sigmoid(self.fc2(F.relu(self.fc1(x))))
+
+    def _cliptsa_weight_init(m):
+        cn = m.__class__.__name__
+        if cn.find('Conv') != -1 or cn.find('Linear') != -1:
+            nn.init.xavier_uniform_(m.weight)
+            if m.bias is not None:
+                m.bias.data.fill_(0)
+
+    class CLIPTSAModel(nn.Module):
+        def __init__(self, n_features, batch_size, k=0.9,
+                     num_samples=100, apply_HA=True):
+            super().__init__()
+            self.batch_size = batch_size
+            self.k_abn = NUM_SEG // 10
+            self.k_nor = NUM_SEG // 10
+            self.division = 2048 // n_features
+            self.apply_HA = apply_HA
+            d = self.division
+            self.hard_attention = HardAttention(
+                k=k, num_samples=num_samples, input_dim=n_features)
+            self.Aggregate = Aggregate(len_feature=2048 // d)
+            self.fc1 = nn.Linear(n_features, 512 // d)
+            self.fc2 = nn.Linear(512 // d, 128 // d)
+            self.fc3 = nn.Linear(128 // d, 1)
+            self.drop_out = nn.Dropout(0.7)
+            self.relu = nn.ReLU()
+            self.sigmoid = nn.Sigmoid()
+            self.mlp = DimReductionMLP(input_dim=n_features)
+            self.apply(_cliptsa_weight_init)
+
+        def forward(self, inputs):
+            k_abn = self.k_abn
+            k_nor = self.k_nor
+            out = inputs
+            bs, ncrops, t, f = out.size()
+            out = out.view(-1, t, f)
+
+            if f > 512:
+                out = self.mlp(out)
+                f = 512
+
+            if self.apply_HA:
+                out = self.hard_attention(out)
+
+            out = self.Aggregate(out)
+            out = self.drop_out(out)
+            features = out
+
+            scores = self.relu(self.fc1(features))
+            scores = self.drop_out(scores)
+            scores = self.relu(self.fc2(scores))
+            scores = self.drop_out(scores)
+            scores = self.sigmoid(self.fc3(scores))
+            scores = scores.view(bs, ncrops, -1).mean(1)
+            scores = scores.unsqueeze(dim=2)
+
+            normal_features = features[0:self.batch_size * ncrops]
+            normal_scores = scores[0:self.batch_size]
+            abnormal_features = features[self.batch_size * ncrops:]
+            abnormal_scores = scores[self.batch_size:]
+
+            feat_magnitudes = torch.norm(features, p=2, dim=2)
+            feat_magnitudes = feat_magnitudes.view(bs, ncrops, -1).mean(1)
+            nfea_magnitudes = feat_magnitudes[0:self.batch_size]
+            afea_magnitudes = feat_magnitudes[self.batch_size:]
+            n_size = nfea_magnitudes.shape[0]
+
+            if n_size == 1:
+                afea_magnitudes = nfea_magnitudes
+                abnormal_scores = normal_scores
+                abnormal_features = normal_features
+
+            select_idx = torch.ones_like(nfea_magnitudes)
+            select_idx = self.drop_out(select_idx)
+            afea_magnitudes_drop = afea_magnitudes * select_idx
+            idx_abn = torch.topk(afea_magnitudes_drop, k_abn, dim=1)[1]
+            idx_abn_feat = idx_abn.unsqueeze(2).expand(
+                -1, -1, abnormal_features.shape[2])
+
+            abn_reshaped = abnormal_features.view(n_size, ncrops, t, f)
+            abn_reshaped = abn_reshaped.permute(1, 0, 2, 3)
+            abn_list = []
+            for abf in abn_reshaped:
+                abn_list.append(torch.gather(abf, 1, idx_abn_feat))
+            feat_select_abn = torch.cat(abn_list, dim=0)
+
+            idx_abn_score = idx_abn.unsqueeze(2).expand(
+                -1, -1, abnormal_scores.shape[2])
+            score_abnormal = torch.mean(
+                torch.gather(abnormal_scores, 1, idx_abn_score), dim=1)
+
+            select_idx_n = torch.ones_like(nfea_magnitudes)
+            select_idx_n = self.drop_out(select_idx_n)
+            nfea_magnitudes_drop = nfea_magnitudes * select_idx_n
+            idx_nor = torch.topk(nfea_magnitudes_drop, k_nor, dim=1)[1]
+            idx_nor_feat = idx_nor.unsqueeze(2).expand(
+                -1, -1, normal_features.shape[2])
+
+            nor_reshaped = normal_features.view(n_size, ncrops, t, f)
+            nor_reshaped = nor_reshaped.permute(1, 0, 2, 3)
+            nor_list = []
+            for nf in nor_reshaped:
+                nor_list.append(torch.gather(nf, 1, idx_nor_feat))
+            feat_select_nor = torch.cat(nor_list, dim=0)
+
+            idx_nor_score = idx_nor.unsqueeze(2).expand(
+                -1, -1, normal_scores.shape[2])
+            score_normal = torch.mean(
+                torch.gather(normal_scores, 1, idx_nor_score), dim=1)
+
+            return (score_abnormal, score_normal, feat_select_abn,
+                    feat_select_nor, feat_select_abn, feat_select_abn,
+                    scores, feat_select_abn, feat_select_abn,
+                    feat_magnitudes)
+
+    # ================================================================
+    # 6A. LOSS: EfficientVAD MIL Ranking
+    # ================================================================
 
     class MILLoss(nn.Module):
         def __init__(self, margin=1.0, mag_m=100.0, mag_w=1e-4,
@@ -413,25 +640,55 @@ def main():
             return total, dict(rank=l_rank.item(), mag=l_mag.item(),
                                smooth=l_sm.item(), sparse=l_sp.item())
 
-    # ═══════════════════════════════════════════════════════════
+    # ================================================================
+    # 6B. LOSS: CLIP-TSA RTFM
+    # ================================================================
+
+    class RTFMLoss(nn.Module):
+        def __init__(self, alpha=0.0001, margin=100):
+            super().__init__()
+            self.alpha = alpha
+            self.margin = margin
+            self.criterion = nn.BCELoss()
+
+        def forward(self, score_normal, score_abnormal, nlabel, alabel,
+                    feat_n, feat_a):
+            label = torch.cat((nlabel, alabel), 0)
+            score = torch.cat((score_normal, score_abnormal), 0).squeeze()
+            loss_cls = self.criterion(score, label)
+            loss_abn = torch.abs(
+                self.margin -
+                torch.norm(torch.mean(feat_a, dim=1), p=2, dim=1))
+            loss_nor = torch.norm(torch.mean(feat_n, dim=1), p=2, dim=1)
+            loss_rtfm = torch.mean((loss_abn + loss_nor) ** 2)
+            return loss_cls + self.alpha * loss_rtfm
+
+    def ctsa_sparsity(arr, lamda2=8e-3):
+        return lamda2 * torch.mean(torch.norm(arr, dim=0))
+
+    def ctsa_smooth(arr, lamda1=8e-4):
+        arr2 = torch.zeros_like(arr)
+        arr2[:-1] = arr[1:]
+        arr2[-1] = arr[-1]
+        return lamda1 * torch.sum((arr2 - arr) ** 2)
+
+    # ================================================================
     # 7. DATASET
-    # ═══════════════════════════════════════════════════════════
+    # ================================================================
 
     class TrainSegDataset(Dataset):
         def __init__(self, paths):
             self.paths = paths
-
         def __len__(self):
             return len(self.paths)
-
         def __getitem__(self, i):
             feat = np.load(self.paths[i]).astype(np.float32)
             feat = process_feat(feat, NUM_SEG)
             return torch.from_numpy(feat)
 
-    # ═══════════════════════════════════════════════════════════
-    # 8. FRAME-LEVEL EVALUATION (matching CLIP-TSA exactly)
-    # ═══════════════════════════════════════════════════════════
+    # ================================================================
+    # 8. EVALUATION
+    # ================================================================
 
     _test_feat_cache = []
 
@@ -441,34 +698,16 @@ def main():
             return
         print(f"  Caching {len(file_paths)} test features...")
         _test_feat_cache = []
-        total_segs = 0
         for path in file_paths:
-            feat = np.load(path).astype(np.float32)
-            _test_feat_cache.append(feat)
-            total_segs += feat.shape[0]
+            _test_feat_cache.append(np.load(path).astype(np.float32))
         mem_mb = sum(f.nbytes for f in _test_feat_cache) / 1e6
-        print(f"  Cached: {total_segs:,} total segments, {mem_mb:.1f} MB")
+        print(f"  Cached: {mem_mb:.1f} MB")
 
-    @torch.no_grad()
-    def evaluate(model, file_paths, gt, device):
-        model.eval()
-        _cache_test_features(file_paths)
-
-        all_scores = []
-        for feat in _test_feat_cache:
-            x = torch.from_numpy(feat).unsqueeze(0).to(device)
-            sc, _ = model(x)
-            all_scores.append(sc[0].cpu().numpy())
-
+    def _frame_metrics(all_scores, gt):
         seg_pred = np.concatenate(all_scores)
         frame_pred = np.repeat(seg_pred, CLIP_LEN)
-
-        gt_use = gt
-        if len(frame_pred) != len(gt_use):
-            mn = min(len(frame_pred), len(gt_use))
-            frame_pred = frame_pred[:mn]
-            gt_use = gt_use[:mn]
-
+        mn = min(len(frame_pred), len(gt))
+        frame_pred, gt_use = frame_pred[:mn], gt[:mn]
         ap = average_precision_score(gt_use, frame_pred) * 100
         try:
             auc_val = roc_auc_score(gt_use, frame_pred) * 100
@@ -476,22 +715,49 @@ def main():
             auc_val = float("nan")
         return ap, auc_val
 
-    # ═══════════════════════════════════════════════════════════
-    # 9. TRAINING
-    # ═══════════════════════════════════════════════════════════
+    @torch.no_grad()
+    def evaluate_evad(model, file_paths, gt, device):
+        model.eval()
+        _cache_test_features(file_paths)
+        all_scores = []
+        for feat in _test_feat_cache:
+            x = torch.from_numpy(feat).unsqueeze(0).to(device)
+            sc, _ = model(x)
+            all_scores.append(sc[0].cpu().numpy())
+        return _frame_metrics(all_scores, gt)
 
-    print("\n" + "=" * 70)
-    print("PHASE 4: TRAINING")
-    print("=" * 70)
+    @torch.no_grad()
+    def evaluate_ctsa(model, file_paths, gt, device):
+        model.eval()
+        _cache_test_features(file_paths)
+        all_scores = []
+        for feat in _test_feat_cache:
+            x = torch.from_numpy(feat).unsqueeze(0).unsqueeze(0).to(device)
+            outputs = model(x)
+            sc = outputs[6].squeeze().cpu().numpy()
+            all_scores.append(sc)
+        return _frame_metrics(all_scores, gt)
 
-    MAX_ITER = 20
+    # ================================================================
+    # 9. SHARED HYPERPARAMS
+    # ================================================================
+
+    MAX_ITER = 4000
     BATCH = 16
     LR = 1e-3
     WD = 5e-3
-    K = 3
     SEED = 0
-    EVAL_INTERVAL = 5
-    EVAL_START = 0
+    EVAL_INTERVAL = 50
+    EVAL_START = 200
+    SAVE = "/kaggle/working"
+
+    # ================================================================
+    # 10. TRAIN EFFICIENTVAD
+    # ================================================================
+
+    print("\n" + "=" * 60)
+    print("PHASE A: TRAINING EfficientVAD (4000 iter)")
+    print("=" * 60)
 
     torch.manual_seed(SEED)
     np.random.seed(SEED)
@@ -501,43 +767,36 @@ def main():
 
     abn_ds = TrainSegDataset(train_abn_paths)
     nor_ds = TrainSegDataset(train_nor_paths)
-
     abn_loader = DataLoader(abn_ds, batch_size=BATCH, shuffle=True,
                             num_workers=0, pin_memory=False, drop_last=True)
     nor_loader = DataLoader(nor_ds, batch_size=BATCH, shuffle=True,
                             num_workers=0, pin_memory=False, drop_last=True)
 
-    print(f"Abnormal loader: {len(abn_loader)} batches ({len(abn_ds)} samples)")
-    print(f"Normal loader:   {len(nor_loader)} batches ({len(nor_ds)} samples)")
+    print(f"Abn loader: {len(abn_loader)} batches  |  "
+          f"Nor loader: {len(nor_loader)} batches")
 
     bn = min(128, FEAT_DIM // 4)
     se_r = min(16, FEAT_DIM // 8)
-    model = EfficientVAD(FEAT_DIM, bn, se_r, hid=128, drop=0.6).to(DEVICE)
+    evad_model = EfficientVAD(FEAT_DIM, bn, se_r, hid=128, drop=0.6).to(DEVICE)
+    evad_params = sum(p.numel() for p in evad_model.parameters())
+    print(f"EfficientVAD: {evad_params:,} params ({evad_params/1e6:.3f}M)")
 
-    n_params = sum(p.numel() for p in model.parameters())
-    print(f"\nEfficientVAD  |  {n_params:,} params ({n_params / 1e6:.3f}M)")
-    print(f"feat={FEAT_DIM}  bn={bn}  se_r={se_r}  seg={NUM_SEG}")
-    print(f"iters={MAX_ITER}  bs={BATCH}  lr={LR}  wd={WD}  top_k={K}  seed={SEED}")
+    evad_criterion = MILLoss(k=3)
+    evad_optimizer = optim.Adam(evad_model.parameters(), lr=LR, weight_decay=WD)
 
-    criterion = MILLoss(k=K)
-    optimizer = optim.Adam(model.parameters(), lr=LR, weight_decay=WD)
+    evad_best_ap = 0.0
+    evad_best_step = 0
+    evad_history = []
 
-    SAVE = "/kaggle/working"
-    best_ap = 0.0
-    best_step = 0
-    history = []
-
-    ap0, auc0 = evaluate(model, test_paths, frame_gt, DEVICE)
-    print(f"\nBefore training: AP {ap0:.2f}%  AUC {auc0:.2f}%")
-    print(f"\nTraining ({MAX_ITER} iterations)...")
-    print("-" * 70)
+    ap0, auc0 = evaluate_evad(evad_model, test_paths, frame_gt, DEVICE)
+    print(f"Before training: AP {ap0:.2f}% AUC {auc0:.2f}%")
 
     t_start = time.time()
     running_loss = 0.0
 
     for step in range(1, MAX_ITER + 1):
-        model.train()
-        criterion.train()
+        evad_model.train()
+        evad_criterion.train()
 
         if (step - 1) % len(abn_loader) == 0:
             abn_iter = iter(abn_loader)
@@ -547,127 +806,271 @@ def main():
         a_feat = next(abn_iter).to(DEVICE)
         n_feat = next(nor_iter).to(DEVICE)
 
-        optimizer.zero_grad()
-        a_sc, a_mg = model(a_feat)
-        n_sc, n_mg = model(n_feat)
-        loss, det = criterion(a_sc, n_sc, a_mg, n_mg)
+        evad_optimizer.zero_grad()
+        a_sc, a_mg = evad_model(a_feat)
+        n_sc, n_mg = evad_model(n_feat)
+        loss, det = evad_criterion(a_sc, n_sc, a_mg, n_mg)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
-
+        torch.nn.utils.clip_grad_norm_(evad_model.parameters(), 1.0)
+        evad_optimizer.step()
         running_loss += loss.item()
 
-        if step % 5 == 0 or step == 1:
+        if step % 200 == 0 or step == 1:
             elapsed = time.time() - t_start
-            n_avg = min(step, 5)
-            avg_loss = running_loss / n_avg
+            avg = running_loss / min(step, 200)
             running_loss = 0.0
-            print(f"Step {step:4d}/{MAX_ITER} | loss {avg_loss:.4f} | "
-                  f"rank {det['rank']:.4f} | {elapsed:.0f}s")
+            print(f"[EVAD] Step {step:4d}/{MAX_ITER} | loss {avg:.4f} | "
+                  f"{elapsed:.0f}s")
 
-        if step % EVAL_INTERVAL == 0 and step > EVAL_START:
-            ap, auc_val = evaluate(model, test_paths, frame_gt, DEVICE)
-
-            if ap > best_ap:
-                best_ap = ap
-                best_step = step
+        should_eval = ((step >= EVAL_START and step % EVAL_INTERVAL == 0)
+                       or step == MAX_ITER)
+        if should_eval:
+            ap, auc_val = evaluate_evad(
+                evad_model, test_paths, frame_gt, DEVICE)
+            if ap > evad_best_ap:
+                evad_best_ap = ap
+                evad_best_step = step
                 torch.save({
                     "step": step,
-                    "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
+                    "model_state_dict": evad_model.state_dict(),
                     "frame_ap": float(ap), "frame_auc": float(auc_val),
-                    "feat_dim": int(FEAT_DIM), "params": int(n_params),
+                    "feat_dim": int(FEAT_DIM), "params": int(evad_params),
                 }, os.path.join(SAVE, "efficientvad_xd_best.pth"))
-                print(f"  Step {step:4d} | AP {ap:.2f}% AUC {auc_val:.2f}% * NEW BEST")
-            else:
-                print(f"  Step {step:4d} | AP {ap:.2f}% AUC {auc_val:.2f}%  "
-                      f"(best: {best_ap:.2f}% @ step {best_step})")
+                print(f"[EVAD] Step {step:4d} | AP {ap:.2f}% AUC {auc_val:.2f}%"
+                      f" * BEST")
+            elif step % 200 == 0 or step == MAX_ITER:
+                print(f"[EVAD] Step {step:4d} | AP {ap:.2f}% AUC {auc_val:.2f}%"
+                      f"  (best: {evad_best_ap:.2f}% @{evad_best_step})")
+            evad_history.append(dict(step=step, ap=ap, auc=auc_val))
 
-            history.append(dict(step=step, frame_ap=ap, frame_auc=auc_val))
+    evad_time = time.time() - t_start
 
-    torch.save({
-        "step": MAX_ITER,
-        "model_state_dict": model.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
-        "feat_dim": FEAT_DIM, "params": n_params,
-    }, os.path.join(SAVE, "efficientvad_xd_final.pth"))
-
-    # ═══════════════════════════════════════════════════════════
-    # 10. FINAL RESULTS
-    # ═══════════════════════════════════════════════════════════
-
-    print("\n" + "=" * 70)
-    print("FINAL RESULTS")
-    print("=" * 70)
-
-    total_time = time.time() - t_start
-    print(f"Training time: {total_time:.0f}s ({total_time / 60:.1f}m)")
-
-    if best_ap > 0:
+    if evad_best_ap > 0:
         ckpt = torch.load(os.path.join(SAVE, "efficientvad_xd_best.pth"),
                           map_location=DEVICE, weights_only=False)
-        model.load_state_dict(ckpt["model_state_dict"])
+        evad_model.load_state_dict(ckpt["model_state_dict"])
+    evad_final_ap, evad_final_auc = evaluate_evad(
+        evad_model, test_paths, frame_gt, DEVICE)
+    print(f"\n[EVAD] DONE: AP {evad_final_ap:.2f}% AUC {evad_final_auc:.2f}%"
+          f" | best@{evad_best_step} | {evad_time:.0f}s")
 
-    final_ap, final_auc = evaluate(model, test_paths, frame_gt, DEVICE)
+    del evad_model, evad_criterion, evad_optimizer
+    torch.cuda.empty_cache()
 
-    print(f"Best step:        {best_step}")
-    print(f"Frame-level AP:   {final_ap:.2f}%   (primary XD-Violence metric)")
-    print(f"Frame-level AUC:  {final_auc:.2f}%")
-    print(f"Parameters:       {n_params:,} ({n_params / 1e6:.3f}M)")
+    # ================================================================
+    # 11. TRAIN CLIP-TSA
+    # ================================================================
 
-    model.eval()
+    print("\n" + "=" * 60)
+    print("PHASE B: TRAINING CLIP-TSA (4000 iter)")
+    print("=" * 60)
+
+    torch.manual_seed(SEED)
+    np.random.seed(SEED)
+    random.seed(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
+
+    abn_loader2 = DataLoader(abn_ds, batch_size=BATCH, shuffle=True,
+                             num_workers=0, pin_memory=False, drop_last=True)
+    nor_loader2 = DataLoader(nor_ds, batch_size=BATCH, shuffle=True,
+                             num_workers=0, pin_memory=False, drop_last=True)
+
+    ctsa_model = CLIPTSAModel(
+        FEAT_DIM, BATCH, k=0.9, num_samples=100, apply_HA=True).to(DEVICE)
+    ctsa_total_params = sum(p.numel() for p in ctsa_model.parameters())
+    ctsa_active_params = ctsa_total_params - sum(
+        p.numel() for p in ctsa_model.mlp.parameters())
+    print(f"CLIP-TSA: {ctsa_total_params:,} total params "
+          f"({ctsa_active_params:,} active, MLP unused for ViT)")
+
+    rtfm_loss_fn = RTFMLoss(alpha=0.0001, margin=100)
+    ctsa_optimizer = optim.Adam(
+        ctsa_model.parameters(), lr=LR, weight_decay=WD)
+
+    ctsa_best_ap = 0.0
+    ctsa_best_step = 0
+    ctsa_history = []
+
+    ap0, auc0 = evaluate_ctsa(ctsa_model, test_paths, frame_gt, DEVICE)
+    print(f"Before training: AP {ap0:.2f}% AUC {auc0:.2f}%")
+
+    nlabel_t = torch.zeros(BATCH).to(DEVICE)
+    alabel_t = torch.ones(BATCH).to(DEVICE)
+
+    t_start2 = time.time()
+    running_loss2 = 0.0
+
+    for step in range(1, MAX_ITER + 1):
+        ctsa_model.train()
+
+        if (step - 1) % len(abn_loader2) == 0:
+            abn_iter2 = iter(abn_loader2)
+        if (step - 1) % len(nor_loader2) == 0:
+            nor_iter2 = iter(nor_loader2)
+
+        a_feat = next(abn_iter2).to(DEVICE)
+        n_feat = next(nor_iter2).to(DEVICE)
+
+        inp = torch.cat((n_feat.unsqueeze(1), a_feat.unsqueeze(1)), 0)
+
+        (score_abn, score_nor, feat_sel_abn, feat_sel_nor,
+         _, _, scores_all, _, _, _) = ctsa_model(inp)
+
+        scores_flat = scores_all.view(BATCH * NUM_SEG * 2, -1).squeeze()
+        abn_scores_flat = scores_flat[BATCH * NUM_SEG:]
+
+        loss_rtfm = rtfm_loss_fn(
+            score_nor, score_abn, nlabel_t, alabel_t,
+            feat_sel_nor, feat_sel_abn)
+        loss_sp = ctsa_sparsity(abn_scores_flat)
+        loss_sm = ctsa_smooth(abn_scores_flat)
+        cost = loss_rtfm + loss_sp + loss_sm
+
+        ctsa_optimizer.zero_grad()
+        cost.backward()
+        ctsa_optimizer.step()
+        running_loss2 += cost.item()
+
+        if step % 200 == 0 or step == 1:
+            elapsed = time.time() - t_start2
+            avg = running_loss2 / min(step, 200)
+            running_loss2 = 0.0
+            print(f"[CTSA] Step {step:4d}/{MAX_ITER} | loss {avg:.4f} | "
+                  f"{elapsed:.0f}s")
+
+        should_eval = ((step >= EVAL_START and step % EVAL_INTERVAL == 0)
+                       or step == MAX_ITER)
+        if should_eval:
+            ap, auc_val = evaluate_ctsa(
+                ctsa_model, test_paths, frame_gt, DEVICE)
+            if ap > ctsa_best_ap:
+                ctsa_best_ap = ap
+                ctsa_best_step = step
+                torch.save({
+                    "step": step,
+                    "model_state_dict": ctsa_model.state_dict(),
+                    "frame_ap": float(ap), "frame_auc": float(auc_val),
+                    "params": int(ctsa_active_params),
+                }, os.path.join(SAVE, "cliptsa_xd_best.pth"))
+                print(f"[CTSA] Step {step:4d} | AP {ap:.2f}% AUC {auc_val:.2f}%"
+                      f" * BEST")
+            elif step % 200 == 0 or step == MAX_ITER:
+                print(f"[CTSA] Step {step:4d} | AP {ap:.2f}% AUC {auc_val:.2f}%"
+                      f"  (best: {ctsa_best_ap:.2f}% @{ctsa_best_step})")
+            ctsa_history.append(dict(step=step, ap=ap, auc=auc_val))
+
+    ctsa_time = time.time() - t_start2
+
+    if ctsa_best_ap > 0:
+        ckpt = torch.load(os.path.join(SAVE, "cliptsa_xd_best.pth"),
+                          map_location=DEVICE, weights_only=False)
+        ctsa_model.load_state_dict(ckpt["model_state_dict"])
+    ctsa_final_ap, ctsa_final_auc = evaluate_ctsa(
+        ctsa_model, test_paths, frame_gt, DEVICE)
+    print(f"\n[CTSA] DONE: AP {ctsa_final_ap:.2f}% AUC {ctsa_final_auc:.2f}%"
+          f" | best@{ctsa_best_step} | {ctsa_time:.0f}s")
+
+    # ================================================================
+    # 12. LATENCY & FLOPS (EfficientVAD only — our contribution)
+    # ================================================================
+
+    print("\n" + "=" * 60)
+    print("EFFICIENCY METRICS (EfficientVAD)")
+    print("=" * 60)
+
+    if evad_best_ap > 0:
+        ckpt = torch.load(os.path.join(SAVE, "efficientvad_xd_best.pth"),
+                          map_location=DEVICE, weights_only=False)
+    evad_bench = EfficientVAD(FEAT_DIM, bn, se_r, hid=128, drop=0.6).to(DEVICE)
+    if evad_best_ap > 0:
+        evad_bench.load_state_dict(ckpt["model_state_dict"])
+    evad_bench.eval()
+
     dummy = torch.randn(1, NUM_SEG, FEAT_DIM).to(DEVICE)
     for _ in range(10):
-        model(dummy)
+        evad_bench(dummy)
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     t0 = time.time()
     for _ in range(1000):
-        model(dummy)
+        evad_bench(dummy)
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     latency = (time.time() - t0) / 1000 * 1000
-    print(f"Latency:          {latency:.2f} ms/sample")
+    print(f"Latency: {latency:.2f} ms/sample (32-seg input)")
 
     flops = 0
-    for m in model.modules():
+    for m in evad_bench.modules():
         if isinstance(m, nn.Linear):
             flops += 2 * m.in_features * m.out_features
         elif isinstance(m, nn.Conv1d):
-            flops += 2 * m.kernel_size[0] * (m.in_channels // m.groups) * m.out_channels * NUM_SEG
-    print(f"FLOPs (est):      {flops:,} ({flops / 1e6:.2f}M)")
+            flops += (2 * m.kernel_size[0] * (m.in_channels // m.groups)
+                      * m.out_channels * NUM_SEG)
+    print(f"FLOPs (est): {flops:,} ({flops/1e6:.2f}M)")
+    del evad_bench
 
-    print(f"\n{'=' * 70}")
-    print("COMPARISON  (XD-Violence, frame-level AP%)")
-    print(f"{'=' * 70}")
-    print(f"| {'Method':<25} | {'AP%':>7} | {'AUC%':>7} | {'Params':>10} |")
-    print(f"|{'-' * 27}|{'-' * 9}|{'-' * 9}|{'-' * 12}|")
-    print(f"| {'Wu et al. (ECCV 20)':<25} | {'75.41':>7} | {'--':>7} | {'--':>10} |")
-    print(f"| {'RTFM (ICCV 21)':<25} | {'77.81':>7} | {'--':>7} | {'~24.7M':>10} |")
-    print(f"| {'CLIP-TSA (ICIP 23)':<25} | {'82.17':>7} | {'--':>7} | {'1.68M':>10} |")
-    print(f"| {'VadCLIP (AAAI 24)':<25} | {'84.51':>7} | {'--':>7} | {'large':>10} |")
-    print(f"| {'EfficientVAD (Ours)':<25} | {final_ap:>6.2f}% | {final_auc:>6.2f}% | {n_params / 1e6:>9.3f}M |")
+    # ================================================================
+    # 13. FINAL COMPARISON
+    # ================================================================
+
+    print("\n" + "=" * 60)
+    print("FINAL COMPARISON  (XD-Violence, frame-level AP%)")
+    print("=" * 60)
+    print(f"| {'Method':<25} | {'AP%':>7} | {'AUC%':>7} | {'Params':>10} |"
+          f" {'Time':>6} |")
+    print(f"|{'-'*27}|{'-'*9}|{'-'*9}|{'-'*12}|{'-'*8}|")
+    print(f"| {'Wu et al. (ECCV 20)':<25} | {'75.41':>7} | {'--':>7} |"
+          f" {'--':>10} | {'--':>6} |")
+    print(f"| {'RTFM (ICCV 21)':<25} | {'77.81':>7} | {'--':>7} |"
+          f" {'~24.7M':>10} | {'--':>6} |")
+    print(f"| {'CLIP-TSA (paper)':<25} | {'82.17':>7} | {'--':>7} |"
+          f" {'1.68M':>10} | {'--':>6} |")
+    print(f"| {'CLIP-TSA (ours)':<25} | {ctsa_final_ap:>6.2f}% |"
+          f" {ctsa_final_auc:>6.2f}% | {ctsa_active_params/1e6:>9.3f}M |"
+          f" {ctsa_time/60:>5.1f}m |")
+    print(f"| {'EfficientVAD (ours)':<25} | {evad_final_ap:>6.2f}% |"
+          f" {evad_final_auc:>6.2f}% | {evad_params/1e6:>9.3f}M |"
+          f" {evad_time/60:>5.1f}m |")
+
+    gap = evad_final_ap - ctsa_final_ap
+    param_ratio = ctsa_active_params / evad_params
+    print(f"\nAP gap: {gap:+.2f}% (EfficientVAD vs CLIP-TSA ours)")
+    print(f"Param ratio: CLIP-TSA is {param_ratio:.1f}x larger")
+    print(f"EfficientVAD: {evad_params:,} params | "
+          f"Latency: {latency:.2f}ms | FLOPs: {flops/1e6:.2f}M")
 
     summary = {
         "version": VERSION,
         "dataset": "xd-violence",
-        "metric": "frame-level AP (matching CLIP-TSA)",
-        "best_step": best_step,
+        "metric": "frame-level AP",
+        "efficientvad": {
+            "best_step": evad_best_step,
+            "frame_ap": evad_final_ap,
+            "frame_auc": evad_final_auc,
+            "params": evad_params,
+            "flops": flops,
+            "latency_ms": latency,
+            "training_time_s": evad_time,
+            "history": evad_history,
+        },
+        "cliptsa": {
+            "best_step": ctsa_best_step,
+            "frame_ap": ctsa_final_ap,
+            "frame_auc": ctsa_final_auc,
+            "params_active": ctsa_active_params,
+            "params_total": ctsa_total_params,
+            "training_time_s": ctsa_time,
+            "history": ctsa_history,
+        },
         "total_steps": MAX_ITER,
-        "frame_ap": final_ap,
-        "frame_auc": final_auc,
-        "params": n_params,
-        "flops": flops,
-        "latency_ms": latency,
-        "training_time_s": total_time,
+        "seed": SEED,
+        "batch_size": BATCH,
         "n_train_abn": len(train_abn_paths),
         "n_train_nor": len(train_nor_paths),
         "n_test": len(test_paths),
-        "gt_frames": len(frame_gt),
-        "gt_anomalous": int(frame_gt.sum()),
-        "history": history,
     }
-    with open(os.path.join(SAVE, "efficientvad_xd_summary.json"), "w") as f:
+    with open(os.path.join(SAVE, "comparison_summary.json"), "w") as f:
         json.dump(summary, f, indent=2)
 
     print(f"\nSaved to {SAVE}/")
@@ -678,8 +1081,8 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        print(f"\n{'=' * 70}")
+        print(f"\n{'=' * 60}")
         print(f"FATAL ERROR: {type(e).__name__}: {e}")
-        print(f"{'=' * 70}")
+        print(f"{'=' * 60}")
         traceback.print_exc()
         sys.exit(1)
