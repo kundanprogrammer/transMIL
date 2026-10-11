@@ -121,10 +121,17 @@ def main():
 
     print(f"Features root: {FEAT_ROOT}")
 
-    train_abn_dir = os.path.join(FEAT_ROOT, "train", "abn")
-    train_nor_dir = os.path.join(FEAT_ROOT, "train", "nor")
-    test_abn_dir = os.path.join(FEAT_ROOT, "test", "abn")
-    test_nor_dir = os.path.join(FEAT_ROOT, "test", "nor")
+    # Dataset uses "abnormal"/"normal" (full names), not "abn"/"nor"
+    train_abn_dir = os.path.join(FEAT_ROOT, "train", "abnormal")
+    train_nor_dir = os.path.join(FEAT_ROOT, "train", "normal")
+    test_abn_dir = os.path.join(FEAT_ROOT, "test", "abnormal")
+    test_nor_dir = os.path.join(FEAT_ROOT, "test", "normal")
+    # Fallback to short names if full names don't exist
+    if not os.path.isdir(train_abn_dir):
+        train_abn_dir = os.path.join(FEAT_ROOT, "train", "abn")
+        train_nor_dir = os.path.join(FEAT_ROOT, "train", "nor")
+        test_abn_dir = os.path.join(FEAT_ROOT, "test", "abn")
+        test_nor_dir = os.path.join(FEAT_ROOT, "test", "nor")
 
     for d, label in [(train_abn_dir, "train/abn"), (train_nor_dir, "train/nor"),
                      (test_abn_dir, "test/abn"), (test_nor_dir, "test/nor")]:
