@@ -56,26 +56,58 @@ def main():
     print("=" * 60)
 
     INPUT_BASE = "/kaggle/input"
-    FEAT_ROOT = None
 
-    if os.path.isdir(INPUT_BASE):
-        def _scan(d, depth=0):
-            items = sorted(os.listdir(d))
-            if depth < 4:
-                print("  " + "  " * depth + f"[{os.path.basename(d)}/] ({len(items)} items)")
-            for item in items:
-                full = os.path.join(d, item)
-                if os.path.isdir(full):
-                    if item == "features":
-                        return full
-                    r = _scan(full, depth + 1)
-                    if r:
-                        return r
-            return None
-        FEAT_ROOT = _scan(INPUT_BASE)
+    # Robust feature locating (same logic as v16)
+    CLIP_TSA_CANDIDATES = [
+        os.path.join(INPUT_BASE, "kundan-xd",
+                     "Kundan_xdviolence_features",
+                     "xd_fromhttpsgithub.comjoos2010kjCLIP-TSA"),
+        os.path.join(INPUT_BASE, "kundan-xd",
+                     "xd_fromhttpsgithub.comjoos2010kjCLIP-TSA"),
+        os.path.join(INPUT_BASE, "datasets", "kundanpawar0001", "kundan-xd",
+                     "Kundan_xdviolence_features",
+                     "xd_fromhttpsgithub.comjoos2010kjCLIP-TSA"),
+    ]
 
-    if FEAT_ROOT is None:
-        raise RuntimeError("Cannot find features directory")
+    CLIP_TSA_ROOT = None
+    for cand in CLIP_TSA_CANDIDATES:
+        if os.path.isdir(cand):
+            CLIP_TSA_ROOT = cand
+            break
+
+    if CLIP_TSA_ROOT is None:
+        for root, dirs, files in os.walk(INPUT_BASE):
+            depth = root.replace(INPUT_BASE, "").count(os.sep)
+            if depth > 8:
+                dirs.clear()
+                continue
+            if "features" in dirs:
+                feat_dir = os.path.join(root, "features")
+                if os.path.isdir(feat_dir):
+                    subdirs = set(os.listdir(feat_dir))
+                    if {"test", "train"}.issubset(subdirs):
+                        CLIP_TSA_ROOT = root
+                        break
+            basename = os.path.basename(root).lower()
+            if "clip" in basename and "tsa" in basename:
+                CLIP_TSA_ROOT = root
+                break
+
+    if CLIP_TSA_ROOT is None:
+        print("FATAL: Cannot find CLIP-TSA features. Scanning tree:")
+        for dp, dn, fn in os.walk(INPUT_BASE):
+            depth = dp.replace(INPUT_BASE, "").count(os.sep)
+            if depth < 6:
+                n_npy = sum(1 for f in fn if f.endswith(".npy"))
+                print(f"{'  ' * depth}[{os.path.basename(dp)}/] ({n_npy} npy)")
+        raise RuntimeError("Cannot find CLIP-TSA features")
+
+    FEAT_ROOT = os.path.join(CLIP_TSA_ROOT, "features")
+    if not os.path.isdir(FEAT_ROOT):
+        if os.path.isdir(os.path.join(CLIP_TSA_ROOT, "test")):
+            FEAT_ROOT = CLIP_TSA_ROOT
+        else:
+            raise RuntimeError(f"{FEAT_ROOT} not found")
 
     print(f"Features root: {FEAT_ROOT}")
 
