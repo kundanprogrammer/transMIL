@@ -8,14 +8,23 @@ No reimplementation — code is copy-pasted from the repo.
 """
 import os, sys, traceback
 
-sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', buffering=1)
-sys.stderr = os.fdopen(sys.stderr.fileno(), 'w', buffering=1)
-print("BOOT: CLIP-TSA original code started")
+# Write a sentinel file IMMEDIATELY so we know the script started
+try:
+    with open("/kaggle/working/_boot.txt", "w") as _bf:
+        _bf.write("boot_started\n")
+except Exception:
+    pass
+
+print("BOOT: CLIP-TSA original code started", flush=True)
 
 def main():
+    print("MAIN: entered main()", flush=True)
     import glob, time, json, gzip, base64, warnings, random
+    print("MAIN: stdlib imports done", flush=True)
     import numpy as np
+    print("MAIN: numpy imported", flush=True)
     import torch
+    print(f"MAIN: torch {torch.__version__} imported", flush=True)
     import torch.nn as nn
     import torch.nn.functional as F
     import torch.nn.init as torch_init
@@ -23,6 +32,7 @@ def main():
     from torch.utils.data import DataLoader
     from torch.nn import MSELoss
     from sklearn.metrics import auc, roc_curve, precision_recall_curve
+    print("MAIN: all imports done", flush=True)
 
     np.int = int
 
@@ -894,14 +904,15 @@ def main():
 
 try:
     main()
-except Exception as e:
-    traceback.print_exc()
-    print(f"\nFATAL: {type(e).__name__}: {e}")
-    import json as _json
+except BaseException as e:
+    tb = traceback.format_exc()
+    msg = f"FATAL: {type(e).__name__}: {e}\n{tb}"
+    print(msg, flush=True)
     try:
-        with open("/kaggle/working/crash_log.json", "w") as _f:
-            _json.dump({"error": str(e), "type": type(e).__name__,
-                        "traceback": traceback.format_exc()}, _f)
-    except:
+        with open("/kaggle/working/crash_log.txt", "w") as _f:
+            _f.write(msg)
+    except Exception:
         pass
-    sys.exit(1)
+    if not isinstance(e, (KeyboardInterrupt, SystemExit)):
+        sys.exit(1)
+    raise
