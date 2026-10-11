@@ -1,13 +1,13 @@
 """
-EfficientVAD — XD-Violence Training (v8)
-=========================================
-Iteration-based training using CLIP-TSA pre-extracted CLIP ViT-B/16 features.
-Frame-level AP evaluation matching CLIP-TSA methodology exactly.
+EfficientVAD — XD-Violence Training (v9-quick)
+================================================
+Quick 20-iteration sanity check before full training.
+CLIP-TSA pre-extracted CLIP ViT-B/16 features, frame-level AP evaluation.
 
-v8 fixes from v7:
-  - Embeds gt-xd.npy (compressed, 6.5KB) directly — no file search needed
-  - Test ordering: sorted abnormal + sorted normal (matches gt-xd.npy order)
-  - Suppresses sklearn warnings that flooded v7 logs
+v9 changes from v8:
+  - 20 iterations only (sanity check)
+  - Eval every 5 steps from step 1 (no warmup skip)
+  - Loss logged every 5 steps
 """
 
 import os, sys, glob, time, json, gzip, base64, warnings
@@ -19,7 +19,7 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from sklearn.metrics import average_precision_score, roc_auc_score
 
-VERSION = "v8-embedded-gt"
+VERSION = "v9-quick-20iter"
 CLIP_LEN = 16
 NUM_SEG = 32
 
@@ -446,14 +446,14 @@ print("\n" + "=" * 70)
 print("PHASE 4: TRAINING")
 print("=" * 70)
 
-MAX_ITER = 4000
+MAX_ITER = 20
 BATCH = 16
 LR = 1e-3
 WD = 5e-3
 K = 3
 SEED = 3
 EVAL_INTERVAL = 5
-EVAL_START = 150
+EVAL_START = 0
 
 torch.manual_seed(SEED)
 np.random.seed(SEED)
@@ -520,9 +520,9 @@ for step in range(1, MAX_ITER + 1):
 
     running_loss += loss.item()
 
-    if step % 200 == 0:
+    if step % 5 == 0:
         elapsed = time.time() - t_start
-        avg_loss = running_loss / 200
+        avg_loss = running_loss / 5
         running_loss = 0.0
         print(f"Step {step:4d}/{MAX_ITER} | loss {avg_loss:.4f} | "
               f"rank {det['rank']:.4f} | {elapsed:.0f}s")
@@ -542,7 +542,7 @@ for step in range(1, MAX_ITER + 1):
             }, os.path.join(SAVE, "efficientvad_xd_best.pth"))
             print(f"  Step {step:4d} | AP {ap:.2f}% AUC {auc_val:.2f}% * NEW BEST")
 
-        if step % 100 == 0:
+        else:
             print(f"  Step {step:4d} | AP {ap:.2f}% AUC {auc_val:.2f}%  "
                   f"(best: {best_ap:.2f}% @ step {best_step})")
 
