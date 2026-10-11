@@ -1,6 +1,6 @@
 """
-EfficientVAD — XD-Violence Training (v14-validated)
-====================================================
+EfficientVAD — XD-Violence Training (v15-working)
+===================================================
 20-iteration sanity check. CLIP-TSA ViT-B/16 features, frame-level AP.
 Validated: test file ordering matches gt-xd.npy (500 abn + 300 nor, alpha-sorted
 within each group). SEED=0 (matching CLIP-TSA XD runner.sh).
@@ -21,7 +21,7 @@ def main():
     from torch.utils.data import Dataset, DataLoader
     from sklearn.metrics import average_precision_score, roc_auc_score
 
-    VERSION = "v14-validated-20iter"
+    VERSION = "v15-working-20iter"
     CLIP_LEN = 16
     NUM_SEG = 32
 
@@ -575,8 +575,8 @@ def main():
                     "step": step,
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
-                    "frame_ap": ap, "frame_auc": auc_val,
-                    "feat_dim": FEAT_DIM, "params": n_params,
+                    "frame_ap": float(ap), "frame_auc": float(auc_val),
+                    "feat_dim": int(FEAT_DIM), "params": int(n_params),
                 }, os.path.join(SAVE, "efficientvad_xd_best.pth"))
                 print(f"  Step {step:4d} | AP {ap:.2f}% AUC {auc_val:.2f}% * NEW BEST")
             else:
@@ -605,7 +605,7 @@ def main():
 
     if best_ap > 0:
         ckpt = torch.load(os.path.join(SAVE, "efficientvad_xd_best.pth"),
-                          map_location=DEVICE)
+                          map_location=DEVICE, weights_only=False)
         model.load_state_dict(ckpt["model_state_dict"])
 
     final_ap, final_auc = evaluate(model, test_paths, frame_gt, DEVICE)
