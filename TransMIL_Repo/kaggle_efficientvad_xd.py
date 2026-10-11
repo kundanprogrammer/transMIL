@@ -1,9 +1,9 @@
 """
-EfficientVAD — XD-Violence Training (v13-robust)
-=================================================
+EfficientVAD — XD-Violence Training (v14-validated)
+====================================================
 20-iteration sanity check. CLIP-TSA ViT-B/16 features, frame-level AP.
-Fixes: line-buffered stdout, num_workers=0, SEED=0 (matching CLIP-TSA XD),
-full traceback on error, broader feature path discovery.
+Validated: test file ordering matches gt-xd.npy (500 abn + 300 nor, alpha-sorted
+within each group). SEED=0 (matching CLIP-TSA XD runner.sh).
 """
 import os, sys, traceback
 
@@ -21,7 +21,7 @@ def main():
     from torch.utils.data import Dataset, DataLoader
     from sklearn.metrics import average_precision_score, roc_auc_score
 
-    VERSION = "v13-robust-20iter"
+    VERSION = "v14-validated-20iter"
     CLIP_LEN = 16
     NUM_SEG = 32
 
@@ -32,7 +32,9 @@ def main():
     print(f"PyTorch {torch.__version__}  |  CUDA {torch.cuda.is_available()}")
     if torch.cuda.is_available():
         print(f"GPU: {torch.cuda.get_device_name(0)}")
-        print(f"GPU mem: {torch.cuda.get_device_properties(0).total_mem / 1e9:.1f} GB")
+        props = torch.cuda.get_device_properties(0)
+        mem = getattr(props, 'total_memory', getattr(props, 'total_mem', 0))
+        print(f"GPU mem: {mem / 1e9:.1f} GB")
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # ═══════════════════════════════════════════════════════════
@@ -175,7 +177,26 @@ def main():
     print(f"Train: {len(train_abn_paths)} abnormal + {len(train_nor_paths)} normal "
           f"= {len(train_abn_paths) + len(train_nor_paths)}")
     print(f"Test:  {n_test_abn} abnormal + {n_test_nor} normal = {len(test_paths)}")
-    print(f"First 3 test: {[os.path.basename(p) for p in test_paths[:3]]}")
+    print(f"First 3 test abn: {[os.path.basename(p) for p in test_paths[:3]]}")
+    print(f"First 3 test nor: {[os.path.basename(p) for p in test_paths[n_test_abn:n_test_abn+3]]}")
+
+    has_hash = any('#' in os.path.basename(p) for p in test_paths[:5])
+    has_triple = any('___' in os.path.basename(p) for p in test_paths[:5])
+    print(f"Naming: '#' in names={has_hash}, '___' in names={has_triple}")
+    if has_triple and not has_hash:
+        print("  Confirmed: Kaggle naming convention (# replaced by _)")
+
+    if n_test_abn != 500 or n_test_nor != 300:
+        print(f"WARNING: Expected 500 abn + 300 nor, got {n_test_abn} + {n_test_nor}")
+        print("  GT alignment may be wrong! Proceeding but results may be invalid.")
+    else:
+        print("  Test split verified: 500 abnormal + 300 normal (matches gt-xd.npy)")
+
+    sample_segs = [np.load(p).shape[0] for p in test_paths[:10]]
+    avg_segs = np.mean(sample_segs)
+    est_frames = int(avg_segs * len(test_paths) * CLIP_LEN)
+    print(f"  Avg segments/video (sample): {avg_segs:.0f}  |  est frames: ~{est_frames:,}"
+          f"  (GT: 2,330,384)")
 
     # ═══════════════════════════════════════════════════════════
     # 3. LOAD FRAME-LEVEL GT (embedded from CLIP-TSA gt-xd.npy)
