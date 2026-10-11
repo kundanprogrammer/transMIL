@@ -40,7 +40,12 @@ def main():
     CLIP_LEN = 16
 
     # Set default tensor type as original code does
-    torch.set_default_tensor_type('torch.cuda.FloatTensor')
+    # torch.set_default_tensor_type deprecated in PyTorch 2.x, use alternatives
+    try:
+        torch.set_default_tensor_type('torch.cuda.FloatTensor')
+    except Exception:
+        torch.set_default_device('cuda')
+        torch.set_default_dtype(torch.float32)
 
     # ================================================================
     # LOCATE FEATURES (same as our v15/v16 logic)
@@ -55,7 +60,6 @@ def main():
 
     if os.path.isdir(INPUT_BASE):
         def _scan(d, depth=0):
-            global FEAT_ROOT
             items = sorted(os.listdir(d))
             if depth < 4:
                 print("  " + "  " * depth + f"[{os.path.basename(d)}/] ({len(items)} items)")
@@ -809,6 +813,7 @@ def main():
             print(f"[Step {step:4d}/{MAX_EPOCH}] loss {cost.item():.4f} | {elapsed:.0f}s")
 
         # === Original eval schedule: every 5 steps after 150 ===
+        # (770 evals total - faithful to original code)
         if step % 5 == 0 and step > 150:
             auc_val = test(test_loader, model, DEVICE)
             test_info["epoch"].append(step)
@@ -859,5 +864,12 @@ try:
     main()
 except Exception as e:
     traceback.print_exc()
-    print(f"\nFATAL: {e}")
+    print(f"\nFATAL: {type(e).__name__}: {e}")
+    import json as _json
+    try:
+        with open("/kaggle/working/crash_log.json", "w") as _f:
+            _json.dump({"error": str(e), "type": type(e).__name__,
+                        "traceback": traceback.format_exc()}, _f)
+    except:
+        pass
     sys.exit(1)
