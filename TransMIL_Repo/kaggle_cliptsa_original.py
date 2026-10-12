@@ -53,14 +53,8 @@ def main():
     CLIP_LEN = 16
 
     # Original code uses torch.set_default_tensor_type('torch.cuda.FloatTensor')
-    # PyTorch 2.x DataLoader sampler breaks with CUDA default device,
-    # so we keep it for model code but pass CPU generators to DataLoaders.
-    try:
-        torch.set_default_tensor_type('torch.cuda.FloatTensor')
-    except Exception:
-        torch.set_default_device('cuda')
-        torch.set_default_dtype(torch.float32)
-    _cpu_gen = torch.Generator(device='cpu')
+    # but PyTorch 2.x DataLoader sampler breaks with CUDA default device.
+    # Instead we add explicit .cuda() where the original code relied on default.
 
     # ================================================================
     # LOCATE FEATURES (same as our v15/v16 logic)
@@ -277,7 +271,7 @@ def main():
 
     def process_feat(feat, length):
         if type(feat) == torch.Tensor:
-            new_feat = torch.zeros((length, feat.shape[1])).type(torch.float32)
+            new_feat = torch.zeros((length, feat.shape[1]), dtype=torch.float32, device=feat.device)
             r = torch.linspace(0, len(feat), length+1, dtype=torch.int)
             for i in range(length):
                 if r[i]!=r[i+1]:
@@ -625,7 +619,7 @@ def main():
             abnormal_features = abnormal_features.view(n_size, ncrops, t, f)
             abnormal_features = abnormal_features.permute(1, 0, 2, 3)
 
-            total_select_abn_feature = torch.zeros(0)
+            total_select_abn_feature = torch.zeros(0, device=abnormal_features.device)
             for abnormal_feature in abnormal_features:
                 feat_select_abn = torch.gather(abnormal_feature, 1, idx_abn_feat)
                 total_select_abn_feature = torch.cat((total_select_abn_feature, feat_select_abn))
@@ -644,7 +638,7 @@ def main():
             normal_features = normal_features.view(n_size, ncrops, t, f)
             normal_features = normal_features.permute(1, 0, 2, 3)
 
-            total_select_nor_feature = torch.zeros(0)
+            total_select_nor_feature = torch.zeros(0, device=normal_features.device)
             for nor_fea in normal_features:
                 feat_select_normal = torch.gather(nor_fea, 1, idx_normal_feat)
                 total_select_nor_feature = torch.cat((total_select_nor_feature, feat_select_normal))
@@ -758,7 +752,7 @@ def main():
     def test(dataloader, model, device):
         with torch.no_grad():
             model.eval()
-            pred = torch.zeros(0)
+            pred = torch.zeros(0, device=device)
 
             for i, input in enumerate(dataloader):
                 input = input.to(device)
@@ -814,11 +808,11 @@ def main():
     train_nloader = DataLoader(
         CLIPTSADataset(train_nor_paths, is_normal=True, test_mode=False, visual=VISUAL),
         batch_size=BATCH_SIZE, shuffle=True,
-        num_workers=0, pin_memory=False, drop_last=True, generator=_cpu_gen)
+        num_workers=0, pin_memory=False, drop_last=True)
     train_aloader = DataLoader(
         CLIPTSADataset(train_abn_paths, is_normal=False, test_mode=False, visual=VISUAL),
         batch_size=BATCH_SIZE, shuffle=True,
-        num_workers=0, pin_memory=False, drop_last=True, generator=_cpu_gen)
+        num_workers=0, pin_memory=False, drop_last=True)
     test_loader = DataLoader(
         CLIPTSADataset(test_paths, test_mode=True, visual=VISUAL),
         batch_size=1, shuffle=False,
