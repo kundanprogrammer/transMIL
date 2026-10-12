@@ -52,13 +52,15 @@ def main():
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     CLIP_LEN = 16
 
-    # Set default tensor type as original code does
-    # torch.set_default_tensor_type deprecated in PyTorch 2.x, use alternatives
+    # Original code uses torch.set_default_tensor_type('torch.cuda.FloatTensor')
+    # PyTorch 2.x DataLoader sampler breaks with CUDA default device,
+    # so we keep it for model code but pass CPU generators to DataLoaders.
     try:
         torch.set_default_tensor_type('torch.cuda.FloatTensor')
     except Exception:
         torch.set_default_device('cuda')
         torch.set_default_dtype(torch.float32)
+    _cpu_gen = torch.Generator(device='cpu')
 
     # ================================================================
     # LOCATE FEATURES (same as our v15/v16 logic)
@@ -812,11 +814,11 @@ def main():
     train_nloader = DataLoader(
         CLIPTSADataset(train_nor_paths, is_normal=True, test_mode=False, visual=VISUAL),
         batch_size=BATCH_SIZE, shuffle=True,
-        num_workers=0, pin_memory=False, drop_last=True)
+        num_workers=0, pin_memory=False, drop_last=True, generator=_cpu_gen)
     train_aloader = DataLoader(
         CLIPTSADataset(train_abn_paths, is_normal=False, test_mode=False, visual=VISUAL),
         batch_size=BATCH_SIZE, shuffle=True,
-        num_workers=0, pin_memory=False, drop_last=True)
+        num_workers=0, pin_memory=False, drop_last=True, generator=_cpu_gen)
     test_loader = DataLoader(
         CLIPTSADataset(test_paths, test_mode=True, visual=VISUAL),
         batch_size=1, shuffle=False,
