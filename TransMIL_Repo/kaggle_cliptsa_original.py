@@ -1,3 +1,4 @@
+print("ALIVE", flush=True)
 """
 CLIP-TSA Original Code — XD-Violence (Kaggle T4)
 =================================================
@@ -16,6 +17,8 @@ except Exception:
     pass
 
 print("BOOT: CLIP-TSA original code started", flush=True)
+sys.stdout.flush()
+sys.stderr.flush()
 
 def main():
     print("MAIN: entered main()", flush=True)
